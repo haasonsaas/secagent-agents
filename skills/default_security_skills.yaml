@@ -1,0 +1,49 @@
+model: gpt-4.1
+max_file_bytes: 12000
+max_files: 80
+include_globs:
+  - "**/*.py"
+  - "**/*.js"
+  - "**/*.ts"
+  - "**/*.tsx"
+  - "**/*.go"
+  - "**/*.java"
+exclude_globs:
+  - "**/.git/**"
+  - "**/node_modules/**"
+  - "**/.venv/**"
+  - "**/dist/**"
+  - "**/build/**"
+  - "**/__pycache__/**"
+
+vulnerability_classes:
+  - name: "Insecure Direct Object Reference"
+    description: "User can access another tenant/user resource through guessable identifiers without authorization checks."
+    detector_instructions: |
+      Search handlers/controllers/services for user-controlled IDs.
+      Verify each object fetch is scoped by tenant/account ownership.
+      Prioritize endpoints returning financial, PII, or admin data.
+    manager_checks:
+      - "Reject findings that are only theoretical or require impossible attacker capabilities."
+      - "Reject findings that already include explicit ownership/tenant checks in code path."
+      - "Accept only if exploit path is clear and impact is concrete."
+
+  - name: "Missing Authorization on Sensitive Action"
+    description: "Mutation endpoint executes privileged action without role or permission checks."
+    detector_instructions: |
+      Locate write/update/delete operations and money movement/state transition actions.
+      Confirm an authorization guard exists near entrypoint or enforced in called policy layer.
+      Flag endpoints where authn exists but authz is missing.
+    manager_checks:
+      - "Reject findings where centralized middleware clearly enforces required permission."
+      - "Accept when privilege boundary is violated for realistic attacker roles."
+
+  - name: "SQL/Query Injection"
+    description: "User input reaches database query text/filters unsafely."
+    detector_instructions: |
+      Look for string concatenation/interpolation in SQL or ORM raw query functions.
+      Verify parameterized queries are used and untrusted input is validated.
+      Include exploit payload shape in findings.
+    manager_checks:
+      - "Reject cases using parameter binding correctly."
+      - "Accept only when input to query construction is attacker-controlled and unsanitized."
