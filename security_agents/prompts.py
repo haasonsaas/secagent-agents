@@ -102,6 +102,7 @@ Return JSON:
       "preconditions": ["..."],
       "steps": ["..."],
       "assertions": ["..."],
+      "execution_commands": ["pytest tests/path.py -k test_name"],
       "expected_failure_before_fix": "what should fail"
     }}
   ]

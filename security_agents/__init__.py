@@ -1,3 +1,3 @@
 """Security agent pipeline package."""
 
-__all__ = ["config", "pipeline", "prompts", "models"]
+__all__ = ["config", "pipeline", "prompts", "models", "execution", "automation"]

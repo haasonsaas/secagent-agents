@@ -28,6 +28,27 @@ CI gate example:
 uv run secagent --repo /path/to/target/repo --fail-on-severity high
 ```
 
+Run validator command execution (test-executor stage):
+
+```bash
+uv run secagent \
+  --repo /path/to/target/repo \
+  --run-validation \
+  --validation-command-template "pytest {test_file} -k {test_name}"
+```
+
+Auto-apply fixes and open a PR:
+
+```bash
+uv run secagent \
+  --repo /path/to/target/repo \
+  --run-validation \
+  --validation-command-template "pytest {test_file} -k {test_name}" \
+  --apply-fixes \
+  --create-pr \
+  --pr-base main
+```
+
 Or with python module invocation:
 
 ```bash
@@ -55,8 +76,11 @@ Tune these for your environment:
 - rejected findings
 - validation test plans
 - fix plans with candidate diffs
+- validation execution results (if `--run-validation`)
+- fix application results (if `--apply-fixes`)
+- PR metadata (if `--create-pr`)
 
 ## Notes
 
-- This version proposes patch diffs; it does not auto-apply changes.
-- For production use, add sandboxed test execution and automated PR creation.
+- Applying diffs requires the target repo to be a git repository.
+- By default, fix application refuses dirty repos; use `--allow-dirty-repo` to override.

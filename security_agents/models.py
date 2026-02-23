@@ -46,6 +46,7 @@ class ValidationItem(BaseModel):
     preconditions: list[str] = Field(default_factory=list)
     steps: list[str] = Field(default_factory=list)
     assertions: list[str] = Field(default_factory=list)
+    execution_commands: list[str] = Field(default_factory=list)
     expected_failure_before_fix: str
 
 
