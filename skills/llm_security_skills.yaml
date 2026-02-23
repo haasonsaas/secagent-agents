@@ -1,0 +1,244 @@
+model: gpt-4.1
+max_file_bytes: 16000
+max_files: 180
+include_globs:
+  - "**/*.py"
+  - "**/*.js"
+  - "**/*.jsx"
+  - "**/*.ts"
+  - "**/*.tsx"
+  - "**/*.java"
+  - "**/*.go"
+  - "**/*.rb"
+  - "**/*.php"
+  - "**/*.rs"
+  - "**/*.cs"
+  - "**/*.kt"
+  - "**/*.swift"
+  - "**/*.sql"
+  - "**/*.md"
+  - "**/*.txt"
+  - "**/*.prompt"
+  - "**/*.jinja"
+  - "**/*.j2"
+  - "**/*.yml"
+  - "**/*.yaml"
+  - "**/*.json"
+  - "**/*.toml"
+  - "**/*.env*"
+exclude_globs:
+  - "**/.git/**"
+  - "**/node_modules/**"
+  - "**/.venv/**"
+  - "**/dist/**"
+  - "**/build/**"
+  - "**/.next/**"
+  - "**/coverage/**"
+  - "**/__pycache__/**"
+  - "**/.mypy_cache/**"
+  - "**/.pytest_cache/**"
+
+vulnerability_classes:
+  - name: "Direct Prompt Injection / Instruction Override"
+    description: "User-provided prompt content can override system/developer policy and trigger disallowed behavior."
+    detector_instructions: |
+      Identify where untrusted user text is concatenated with system/developer instructions.
+      Check whether policy-critical instructions are isolated and immutable across turns.
+      Flag prompt assembly patterns that allow role confusion, delimiter breakouts, or instruction shadowing.
+      Verify denylist/allowlist checks are enforced outside model text (policy-in-code), not only in prompt prose.
+    manager_checks:
+      - "Reject if policy is enforced by deterministic code after model output and before side effects."
+      - "Reject if untrusted text is strongly sandboxed and never interpreted as instructions."
+      - "Accept only when attacker input can materially alter policy-relevant behavior."
+
+  - name: "Indirect Prompt Injection via Retrieval / Connectors"
+    description: "Model ingests untrusted documents/webpages/emails that inject hidden instructions into agent behavior."
+    detector_instructions: |
+      Trace retrieval pipeline from connectors/vector stores/web fetchers into model context.
+      Detect missing trust boundaries between retrieved content and executable instructions.
+      Check whether retrieved content is tagged, quoted, and treated as data rather than instructions.
+      Prioritize workflows where retrieved context can trigger tool calls, approvals, or sensitive disclosure.
+    manager_checks:
+      - "Reject when retrieved content is constrained to data-only schemas with strict parser boundaries."
+      - "Reject if model cannot invoke tools or side effects from retrieved context."
+      - "Accept with a concrete poisoned document path that changes agent decisions/actions."
+
+  - name: "Tool / Function Calling Authorization Bypass"
+    description: "Agent can invoke privileged tools/functions without robust actor/resource/action authorization checks."
+    detector_instructions: |
+      Enumerate tool definitions and permission gates for each action.
+      Verify authz happens in tool backend (server-side), not just in prompt/tool descriptions.
+      Look for blanket tool access bound to session rather than per-action privileges.
+      Focus on tools with side effects: payments, account changes, secrets access, external requests, code execution.
+    manager_checks:
+      - "Reject when each tool invocation enforces server-side authz against caller identity and scope."
+      - "Reject if tools are read-only and cannot impact sensitive state/data."
+      - "Accept only with a realistic low-privilege path to privileged tool action."
+
+  - name: "Cross-Tenant Context Leakage via Memory / Threads"
+    description: "Conversation memory, cache, embeddings, or session state leaks data across users/tenants."
+    detector_instructions: |
+      Inspect memory stores, chat thread IDs, cache keys, and retrieval namespace scoping.
+      Verify tenant/user identifiers are mandatory in all state read/write paths.
+      Check fallback paths, retries, and background jobs for missing scope propagation.
+      Prioritize long-term memory, semantic caches, and shared summary stores.
+    manager_checks:
+      - "Reject if strong tenant-scoped keys are enforced consistently in every read/write path."
+      - "Reject if leaked artifacts are synthetic/test-only and unreachable in production."
+      - "Accept with concrete cross-tenant read/write scenario and sensitive data impact."
+
+  - name: "System Prompt / Policy Leakage"
+    description: "Agent reveals internal system prompts, policy text, tool schemas, or hidden reasoning artifacts to users."
+    detector_instructions: |
+      Identify endpoints that return raw prompts, traces, debug context, or tool registry metadata.
+      Check for prompt reveal commands and debug modes leaking hidden instructions.
+      Verify filtering/redaction in logs, telemetry, and user-visible error messages.
+      Distinguish benign generic disclosures from leakage of policy bypass details or secrets.
+    manager_checks:
+      - "Reject if only non-sensitive, intentionally public metadata is exposed."
+      - "Reject when leakage has no operational value for bypassing controls."
+      - "Accept when internal prompt/policy/tool details materially improve attacker capability."
+
+  - name: "Insecure Output Handling (Model Output as Code/Query/HTML)"
+    description: "Untrusted model output is executed or rendered without sanitization, enabling injection or code execution."
+    detector_instructions: |
+      Trace model outputs into sinks: eval/exec, SQL, shell commands, templating, markdown->HTML renderers.
+      Check whether outputs are treated as data and validated against strict schemas before use.
+      Flag direct execution of model-generated code, queries, or scripts.
+      Include cases where output is auto-committed, auto-deployed, or auto-run in CI.
+    manager_checks:
+      - "Reject when strict structured output validation and safe interpreters eliminate injection risk."
+      - "Reject if output is display-only with robust escaping and no privileged context."
+      - "Accept when model output can reach executable/render sinks with attacker influence."
+
+  - name: "RAG Poisoning and Retrieval Trust Failures"
+    description: "Poisoned or stale corpus content drives unsafe agent decisions due to weak provenance and trust controls."
+    detector_instructions: |
+      Inspect ingestion, chunking, indexing, and ranking pipelines for provenance metadata and trust scoring.
+      Detect ability for low-trust sources to outrank trusted docs in sensitive workflows.
+      Check missing signature/veracity checks for internal docs and connector content.
+      Prioritize runbooks, policy docs, code snippets, and operational instructions used for actions.
+    manager_checks:
+      - "Reject if high-risk decisions require trusted-source-only retrieval with provenance enforcement."
+      - "Reject if poisoned sources cannot enter corpus in realistic deployment flows."
+      - "Accept when attacker-controlled corpus entries can influence high-impact outcomes."
+
+  - name: "Overly Permissive Agent Autonomy / Missing Step-Up Approval"
+    description: "Agent performs high-risk actions automatically without policy gates, user confirmation, or human review."
+    detector_instructions: |
+      Identify autonomous loops/planners that can chain multiple tool calls to completion.
+      Verify explicit approvals for high-impact actions (money movement, deletes, privilege changes, outbound comms).
+      Check whether approval can be bypassed through prompt wording, retries, or alternate tools.
+      Ensure risk scoring is deterministic and external to model text generation.
+    manager_checks:
+      - "Reject when high-risk actions are blocked pending deterministic approval workflow."
+      - "Reject if agent has no write-capable tools in production."
+      - "Accept when plausible prompts can execute high-risk side effects without robust confirmation."
+
+  - name: "Model Downgrade / Unsafe Model Routing"
+    description: "Routing/fallback logic sends sensitive tasks to weaker or unsafe models, bypassing policy guarantees."
+    detector_instructions: |
+      Review model selection/routing logic across cost, latency, retries, and outage fallbacks.
+      Detect policy checks tied to one model but not consistently enforced across alternates.
+      Verify sensitive workloads cannot silently route to less secure/less aligned providers/models.
+      Inspect feature flags and emergency overrides for missing guardrails.
+    manager_checks:
+      - "Reject if policy enforcement is model-agnostic and deterministic in code."
+      - "Reject when fallback models retain equivalent security guarantees for the same actions."
+      - "Accept with concrete path where fallback/routing weakens protections for sensitive tasks."
+
+  - name: "Excessive Data Exposure to LLM Providers / Logs"
+    description: "Sensitive data is sent to model APIs, traces, or observability pipelines without minimization/redaction."
+    detector_instructions: |
+      Trace prompt assembly and telemetry pipelines for PII, secrets, credentials, and financial data.
+      Check redaction at source and before transport/logging.
+      Verify per-field minimization and retention controls for prompts, responses, and tool transcripts.
+      Review debug/verbose modes that accidentally include full request payloads.
+    manager_checks:
+      - "Reject if sensitive fields are deterministically removed/masked before provider and logs."
+      - "Reject if exposed values are non-sensitive IDs with no abuse value."
+      - "Accept when plaintext sensitive data can leave trust boundary or persist in logs."
+
+  - name: "Secret Exposure in Prompts, Tool Schemas, and Config"
+    description: "API keys, tokens, or internal credentials are embedded in prompts, tool descriptions, or config shipped to runtime."
+    detector_instructions: |
+      Scan prompt templates, examples, environment files, tool metadata, and test fixtures for credentials.
+      Distinguish placeholders from high-confidence secrets (entropy/prefix formats/context clues).
+      Check whether secrets are interpolated into prompts sent to providers.
+      Prioritize long-lived credentials and keys with write/admin scope.
+    manager_checks:
+      - "Reject obvious fake samples/placeholders not used in runtime."
+      - "Reject encrypted artifacts without available decryption keys/context."
+      - "Accept with credible secret evidence and practical abuse scope."
+
+  - name: "Unsafe Code-Execution / Sandbox Escape Surface"
+    description: "Agent can execute generated code/commands in environments lacking isolation, resource limits, or egress controls."
+    detector_instructions: |
+      Identify runtimes used for code execution (containers, sandboxes, local shell, serverless workers).
+      Verify isolation controls: seccomp, user namespaces, filesystem/network restrictions, time/memory quotas.
+      Check for dangerous mounts, host socket exposure, metadata endpoint access, and package install freedom.
+      Focus on workflows where user/model text influences executed code directly.
+    manager_checks:
+      - "Reject when execution is fully isolated with strict egress/filesystem/process controls."
+      - "Reject if runtime cannot access secrets, internal network, or persistent state."
+      - "Accept when model/user-influenced code can access privileged environment capabilities."
+
+  - name: "Package Hallucination / Dependency Confusion in Coding Agents"
+    description: "Agent introduces non-existent or attacker-controlled packages due to hallucination or weak provenance checks."
+    detector_instructions: |
+      Review dependency suggestion/install flows in coding agents and CI automation.
+      Detect absent verification of package existence, publisher trust, signature, and registry scope.
+      Flag automatic install/execute paths from model-proposed package names.
+      Check internal namespace package confusion risks with public registries.
+    manager_checks:
+      - "Reject when package allow-lists, lockfiles, and trusted publisher checks are mandatory."
+      - "Reject if model suggestions cannot trigger installs without human/security review."
+      - "Accept when attacker can exploit package selection flow to run untrusted code."
+
+  - name: "Multimodal Prompt Injection (Image/PDF/Document)"
+    description: "Hidden or obfuscated instructions in images/documents are interpreted and acted on by multimodal agents."
+    detector_instructions: |
+      Locate OCR/document parsing inputs that flow into model context.
+      Check whether extracted text is marked as untrusted and separated from policy instructions.
+      Detect missing sanitization for hidden layers, metadata fields, alt text, and steganographic channels.
+      Prioritize document-processing agents with tool invocation privileges.
+    manager_checks:
+      - "Reject if extracted document content is treated as inert data and cannot drive actions."
+      - "Reject when no multimodal ingestion path exists in production."
+      - "Accept when attacker-supplied media can influence tool use or sensitive outputs."
+
+  - name: "Denial of Wallet / Unbounded Resource Consumption"
+    description: "Attackers trigger excessive token/tool/compute usage leading to cost spikes or service degradation."
+    detector_instructions: |
+      Identify loops, recursive planner chains, and retry storms without budgets.
+      Verify per-user and global quotas for tokens, tool calls, retrieval depth, and execution time.
+      Check prompt length controls and guardrails on externally supplied context.
+      Include abuse scenarios using cheap attacker input causing expensive backend cascades.
+    manager_checks:
+      - "Reject when deterministic budgets and hard cutoffs cap per-request and per-tenant usage."
+      - "Reject if expensive paths require authenticated high-trust actors with strict limits."
+      - "Accept when low-cost attacker input can reliably induce disproportionate backend spend."
+
+  - name: "Agent Identity / Session Confusion"
+    description: "Mix-ups between user identity, delegated agent identity, and tool credentials enable unauthorized actions."
+    detector_instructions: |
+      Trace identity propagation through orchestrator, tool broker, and downstream service calls.
+      Verify actor identity and delegated scopes are explicit, auditable, and immutable per request.
+      Detect shared service credentials used without end-user scope checks.
+      Check replay/retry paths that drop identity context.
+    manager_checks:
+      - "Reject when end-user identity and delegated scopes are cryptographically bound and verified at each hop."
+      - "Reject if tools are fully isolated to non-sensitive read-only operations."
+      - "Accept when identity confusion can cause cross-user action or privilege escalation."
+
+  - name: "Insufficient Safety Evaluation / Regression Testing for Prompts and Tools"
+    description: "Prompt/tool changes ship without adversarial tests, enabling silent regression of safety controls."
+    detector_instructions: |
+      Review CI/CD for prompt and tool schema changes.
+      Check for red-team style test suites covering injection, jailbreak, tool misuse, and sensitive-data leakage.
+      Verify blocking gates exist for failed safety tests prior to deployment.
+      Inspect versioning and rollback controls for prompt/policy artifacts.
+    manager_checks:
+      - "Reject if robust automated adversarial test gates block unsafe prompt/tool changes."
+      - "Reject if affected prompts/tools are non-production or behind strict internal-only flags."
+      - "Accept when production prompt/tool changes can bypass meaningful safety regression checks."

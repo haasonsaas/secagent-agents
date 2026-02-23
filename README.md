@@ -89,6 +89,8 @@ uv run pytest
 
 Default config is in `skills/default_security_skills.yaml`.
 Research notes and source repos are in `skills/research_sources.md`.
+LLM/agent-specific deep profile is in `skills/llm_security_skills.yaml`.
+LLM profile research notes are in `skills/llm_research_sources.md`.
 
 Tune these for your environment:
 
@@ -97,6 +99,34 @@ Tune these for your environment:
 - `max_files` / `max_file_bytes`: context budget
 - `model`: model name used by all agents
 - selection controls: `min_severity`, `only_severity`, `min_confidence`, `max_fixes` (CLI flags)
+
+Use the deep LLM profile:
+
+```bash
+uv run secagent \
+  --repo /path/to/target/repo \
+  --config skills/llm_security_skills.yaml \
+  --min-severity medium \
+  --min-confidence 0.6
+```
+
+The LLM profile goes deep on:
+
+- direct and indirect prompt injection
+- tool/function authz bypass
+- memory/session cross-tenant leakage
+- system prompt/policy leakage
+- insecure output handling to execution sinks
+- RAG poisoning and trust failures
+- unsafe autonomy and missing approvals
+- model downgrade/routing risks
+- secret/data exposure to providers/logs
+- sandbox/code-exec escape surfaces
+- package hallucination/dependency confusion
+- multimodal injection paths
+- denial-of-wallet resource abuse
+- identity/session confusion
+- missing safety regression gates in CI/CD
 
 The default skills pack now includes deep coverage for:
 
