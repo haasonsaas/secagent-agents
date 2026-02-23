@@ -15,6 +15,12 @@ from security_agents.automation import (
 from security_agents.config import load_config
 from security_agents.execution import run_validation_execution
 from security_agents.pipeline import run_pipeline
+from security_agents.selection import (
+    SEVERITY_ORDER,
+    filter_and_rank_fixes,
+    finding_severity,
+    summarize_findings_by_class,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,6 +38,30 @@ def parse_args() -> argparse.Namespace:
         choices=["low", "medium", "high", "critical"],
         default=None,
         help="Exit non-zero if any accepted finding is at or above this severity.",
+    )
+    parser.add_argument(
+        "--min-severity",
+        choices=["low", "medium", "high", "critical"],
+        default="low",
+        help="Only include fixes for findings at or above this severity.",
+    )
+    parser.add_argument(
+        "--only-severity",
+        choices=["low", "medium", "high", "critical"],
+        default=None,
+        help="Only include fixes for findings at exactly this severity.",
+    )
+    parser.add_argument(
+        "--min-confidence",
+        type=float,
+        default=0.0,
+        help="Only include fixes for findings with confidence >= this value (0..1).",
+    )
+    parser.add_argument(
+        "--max-fixes",
+        type=int,
+        default=None,
+        help="Maximum number of fixes to apply/create PRs for after filtering and ranking.",
     )
     parser.add_argument(
         "--run-validation",
@@ -104,20 +134,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-SEVERITY_ORDER = {"low": 1, "medium": 2, "high": 3, "critical": 4}
-
-
-def _finding_severity(finding: dict) -> str:
-    explicit = str(finding.get("updated_severity", "")).lower()
-    if explicit in SEVERITY_ORDER:
-        return explicit
-    nested = finding.get("finding", {})
-    nested_sev = str(nested.get("severity", "")).lower()
-    if nested_sev in SEVERITY_ORDER:
-        return nested_sev
-    return "low"
-
-
 def _build_fix_lookup(accepted_findings: list[dict]) -> dict[str, dict]:
     return {str(item.get("id", "")): item for item in accepted_findings}
 
@@ -126,7 +142,7 @@ def _group_key_for_fix(fix: dict, lookup: dict[str, dict], mode: str) -> str:
     fix_id = str(fix.get("id", ""))
     finding = lookup.get(fix_id, {})
     vuln_class = str(finding.get("vulnerability_class", "unknown-class"))
-    severity = _finding_severity(finding)
+    severity = finding_severity(finding)
     if mode == "class":
         return vuln_class
     if mode == "severity":
@@ -141,14 +157,28 @@ def main() -> int:
     repo = Path(args.repo).resolve()
     config = load_config(args.config)
 
+    if args.min_confidence < 0 or args.min_confidence > 1:
+        raise ValueError("--min-confidence must be between 0 and 1")
+    if args.max_fixes is not None and args.max_fixes < 0:
+        raise ValueError("--max-fixes must be >= 0")
+
     output = run_pipeline(repo, config)
     generated_at = datetime.now(timezone.utc).isoformat()
     severity_counts = {"low": 0, "medium": 0, "high": 0, "critical": 0}
     for finding in output.accepted_findings:
-        severity_counts[_finding_severity(finding)] += 1
+        severity_counts[finding_severity(finding)] += 1
+    class_summary = summarize_findings_by_class(output.accepted_findings)
 
     validation_execution: list[dict] = []
-    filtered_fixes = output.fixes
+    selected_fixes = filter_and_rank_fixes(
+        accepted_findings=output.accepted_findings,
+        fixes=output.fixes,
+        min_confidence=args.min_confidence,
+        min_severity=args.min_severity,
+        only_severity=args.only_severity,
+        max_fixes=args.max_fixes,
+    )
+    filtered_fixes = selected_fixes
     if args.run_validation:
         validation_execution = run_validation_execution(
             repo=repo,
@@ -159,7 +189,7 @@ def main() -> int:
         )
         failed_ids = {item.get("id", "") for item in validation_execution if item.get("status") == "failed"}
         if failed_ids:
-            filtered_fixes = [fix for fix in output.fixes if str(fix.get("id", "")) in failed_ids]
+            filtered_fixes = [fix for fix in selected_fixes if str(fix.get("id", "")) in failed_ids]
         else:
             filtered_fixes = []
 
@@ -225,6 +255,14 @@ def main() -> int:
         "scanned_file_count": len(output.scanned_files),
         "scanned_files": output.scanned_files,
         "severity_counts": severity_counts,
+        "class_summary": class_summary,
+        "selection": {
+            "min_severity": args.min_severity,
+            "only_severity": args.only_severity,
+            "min_confidence": args.min_confidence,
+            "max_fixes": args.max_fixes,
+            "selected_fix_count_pre_validation": len(selected_fixes),
+        },
         "accepted_findings": output.accepted_findings,
         "rejected_findings": [] if args.summary_only else output.rejected_findings,
         "validation": [] if args.summary_only else output.validation,
@@ -244,6 +282,7 @@ def main() -> int:
     print(f"Rejected findings: {len(output.rejected_findings)}")
     print(f"Validation items: {len(output.validation)}")
     print(f"Fix plans: {len(output.fixes)}")
+    print(f"Fixes selected (pre-validation): {len(selected_fixes)}")
     if args.run_validation:
         print(f"Validation execution items: {len(validation_execution)}")
         print(f"Fixes selected after validation execution: {len(filtered_fixes)}")
@@ -262,7 +301,7 @@ def main() -> int:
     if args.fail_on_severity:
         threshold = SEVERITY_ORDER[args.fail_on_severity]
         has_blocker = any(
-            SEVERITY_ORDER[_finding_severity(finding)] >= threshold for finding in output.accepted_findings
+            SEVERITY_ORDER[finding_severity(finding)] >= threshold for finding in output.accepted_findings
         )
         if has_blocker:
             print(f"Failing because finding severity meets threshold: {args.fail_on_severity}")

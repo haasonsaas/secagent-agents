@@ -28,6 +28,16 @@ CI gate example:
 uv run secagent --repo /path/to/target/repo --fail-on-severity high
 ```
 
+Prioritize only strong/high-impact fixes:
+
+```bash
+uv run secagent \
+  --repo /path/to/target/repo \
+  --min-severity high \
+  --min-confidence 0.75 \
+  --max-fixes 15
+```
+
 Run validator command execution (test-executor stage):
 
 ```bash
@@ -68,6 +78,13 @@ Or with python module invocation:
 uv run python -m security_agents.cli --repo /path/to/target/repo --out security_report.json
 ```
 
+Run tests:
+
+```bash
+uv sync --dev
+uv run pytest
+```
+
 ## Config
 
 Default config is in `skills/default_security_skills.yaml`.
@@ -78,6 +95,7 @@ Tune these for your environment:
 - `include_globs` / `exclude_globs`: repository scope
 - `max_files` / `max_file_bytes`: context budget
 - `model`: model name used by all agents
+- selection controls: `min_severity`, `only_severity`, `min_confidence`, `max_fixes` (CLI flags)
 
 ## Output
 
