@@ -22,6 +22,12 @@ Run against any repository:
 uv run secagent --repo /path/to/target/repo --out security_report.json
 ```
 
+CI gate example:
+
+```bash
+uv run secagent --repo /path/to/target/repo --fail-on-severity high
+```
+
 Or with python module invocation:
 
 ```bash

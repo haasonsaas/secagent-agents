@@ -19,7 +19,27 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Write only high-level counts and accepted findings (skip rejected/validation/fixes payloads).",
     )
+    parser.add_argument(
+        "--fail-on-severity",
+        choices=["low", "medium", "high", "critical"],
+        default=None,
+        help="Exit non-zero if any accepted finding is at or above this severity.",
+    )
     return parser.parse_args()
+
+
+SEVERITY_ORDER = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+
+
+def _finding_severity(finding: dict) -> str:
+    explicit = str(finding.get("updated_severity", "")).lower()
+    if explicit in SEVERITY_ORDER:
+        return explicit
+    nested = finding.get("finding", {})
+    nested_sev = str(nested.get("severity", "")).lower()
+    if nested_sev in SEVERITY_ORDER:
+        return nested_sev
+    return "low"
 
 
 def main() -> int:
@@ -29,12 +49,17 @@ def main() -> int:
 
     output = run_pipeline(repo, config)
     generated_at = datetime.now(timezone.utc).isoformat()
+    severity_counts = {"low": 0, "medium": 0, "high": 0, "critical": 0}
+    for finding in output.accepted_findings:
+        severity_counts[_finding_severity(finding)] += 1
+
     payload = {
         "generated_at": generated_at,
         "repo": str(repo),
         "model": config.model,
         "scanned_file_count": len(output.scanned_files),
         "scanned_files": output.scanned_files,
+        "severity_counts": severity_counts,
         "accepted_findings": output.accepted_findings,
         "rejected_findings": [] if args.summary_only else output.rejected_findings,
         "validation": [] if args.summary_only else output.validation,
@@ -49,6 +74,16 @@ def main() -> int:
     print(f"Rejected findings: {len(output.rejected_findings)}")
     print(f"Validation items: {len(output.validation)}")
     print(f"Fix plans: {len(output.fixes)}")
+    print(f"Severity counts: {severity_counts}")
+
+    if args.fail_on_severity:
+        threshold = SEVERITY_ORDER[args.fail_on_severity]
+        has_blocker = any(
+            SEVERITY_ORDER[_finding_severity(finding)] >= threshold for finding in output.accepted_findings
+        )
+        if has_blocker:
+            print(f"Failing because finding severity meets threshold: {args.fail_on_severity}")
+            return 2
     return 0
 
 
