@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from security_agents.automation import apply_fix_diffs, create_pr_for_changes, ensure_clean_git_repo
+from security_agents.automation import (
+    apply_fix_diffs,
+    create_multi_prs_for_groups,
+    create_pr_for_changes,
+    ensure_clean_git_repo,
+)
 from security_agents.config import load_config
 from security_agents.execution import run_validation_execution
 from security_agents.pipeline import run_pipeline
@@ -79,6 +85,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--pr-draft", action="store_true", help="Open the PR as draft.")
     parser.add_argument(
+        "--multi-pr-mode",
+        choices=["none", "class", "severity", "class-severity"],
+        default="none",
+        help="Split fixes into multiple PRs by vulnerability class/severity.",
+    )
+    parser.add_argument(
+        "--multi-pr-limit",
+        type=int,
+        default=10,
+        help="Maximum number of multi-PR groups to create.",
+    )
+    parser.add_argument(
         "--commit-message",
         default="secagent: apply automated security fixes",
         help="Commit message used for PR flow.",
@@ -98,6 +116,24 @@ def _finding_severity(finding: dict) -> str:
     if nested_sev in SEVERITY_ORDER:
         return nested_sev
     return "low"
+
+
+def _build_fix_lookup(accepted_findings: list[dict]) -> dict[str, dict]:
+    return {str(item.get("id", "")): item for item in accepted_findings}
+
+
+def _group_key_for_fix(fix: dict, lookup: dict[str, dict], mode: str) -> str:
+    fix_id = str(fix.get("id", ""))
+    finding = lookup.get(fix_id, {})
+    vuln_class = str(finding.get("vulnerability_class", "unknown-class"))
+    severity = _finding_severity(finding)
+    if mode == "class":
+        return vuln_class
+    if mode == "severity":
+        return severity
+    if mode == "class-severity":
+        return f"{vuln_class} :: {severity}"
+    return "all"
 
 
 def main() -> int:
@@ -129,10 +165,13 @@ def main() -> int:
 
     apply_results: list[dict] = []
     pr_result: dict | None = None
+    pr_results: list[dict] = []
     if args.create_pr and not args.apply_fixes:
         raise ValueError("--create-pr requires --apply-fixes")
+    if args.multi_pr_limit <= 0:
+        raise ValueError("--multi-pr-limit must be > 0")
 
-    if args.apply_fixes:
+    if args.apply_fixes and not args.create_pr:
         if not args.allow_dirty_repo:
             clean, reason = ensure_clean_git_repo(repo)
             if not clean:
@@ -140,19 +179,44 @@ def main() -> int:
         apply_results = apply_fix_diffs(repo, filtered_fixes)
 
     if args.create_pr:
-        if not any(item.get("applied") for item in apply_results):
-            raise RuntimeError("No fixes were applied; refusing to create PR.")
-        pr_result = create_pr_for_changes(
-            repo=repo,
-            base=args.pr_base,
-            branch=args.pr_branch,
-            title=args.pr_title,
-            body=args.pr_body,
-            draft=args.pr_draft,
-            commit_message=args.commit_message,
-        )
-        if not pr_result.get("ok"):
-            raise RuntimeError(f"PR creation failed: {pr_result.get('error', 'unknown error')}")
+        if not filtered_fixes:
+            raise RuntimeError("No fixes selected; refusing to create PR.")
+        if args.multi_pr_mode == "none":
+            pr_result = create_pr_for_changes(
+                repo=repo,
+                base=args.pr_base,
+                branch=args.pr_branch,
+                title=args.pr_title,
+                body=args.pr_body,
+                draft=args.pr_draft,
+                commit_message=args.commit_message,
+                fixes=filtered_fixes,
+            )
+            if not pr_result.get("ok"):
+                raise RuntimeError(f"PR creation failed: {pr_result.get('error', 'unknown error')}")
+            apply_results = list(pr_result.get("apply_results", []))
+        else:
+            lookup = _build_fix_lookup(output.accepted_findings)
+            grouped: dict[str, list[dict]] = defaultdict(list)
+            for fix in filtered_fixes:
+                grouped[_group_key_for_fix(fix, lookup, args.multi_pr_mode)].append(fix)
+            group_items = [
+                {"label": label, "fixes": fixes}
+                for label, fixes in sorted(grouped.items(), key=lambda pair: pair[0])[: args.multi_pr_limit]
+            ]
+            if not group_items:
+                raise RuntimeError("No fix groups to create PRs for.")
+            pr_results = create_multi_prs_for_groups(
+                repo=repo,
+                base=args.pr_base,
+                groups=group_items,
+                title_prefix=args.pr_title,
+                body_prefix=args.pr_body,
+                draft=args.pr_draft,
+                commit_message_prefix=args.commit_message,
+            )
+            if not any(item.get("ok") for item in pr_results):
+                raise RuntimeError("Multi-PR creation failed for all groups.")
 
     payload = {
         "generated_at": generated_at,
@@ -169,6 +233,7 @@ def main() -> int:
         "fixes_selected_after_validation": filtered_fixes,
         "fix_application": apply_results,
         "pr": pr_result,
+        "prs": pr_results,
     }
 
     out_path = Path(args.out)
@@ -187,6 +252,11 @@ def main() -> int:
         print(f"Fixes applied: {applied_count}/{len(apply_results)}")
     if pr_result and pr_result.get("ok"):
         print(f"PR created: {pr_result.get('pr_url')}")
+    if pr_results:
+        created = [item for item in pr_results if item.get("ok")]
+        print(f"PRs created: {len(created)}/{len(pr_results)}")
+        for item in created:
+            print(f"- [{item.get('label')}] {item.get('pr_url')}")
     print(f"Severity counts: {severity_counts}")
 
     if args.fail_on_severity:

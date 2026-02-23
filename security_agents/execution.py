@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,41 @@ class ValidationExecutionResult:
     stdout: str
     stderr: str
     error: str | None
+
+
+@dataclass
+class TestEnvironment:
+    has_pytest: bool
+    has_go: bool
+    has_jest: bool
+    has_node: bool
+    has_rust: bool
+
+
+def detect_test_environment(repo: Path) -> TestEnvironment:
+    pyproject = repo / "pyproject.toml"
+    requirements = repo / "requirements.txt"
+    go_mod = repo / "go.mod"
+    package_json = repo / "package.json"
+    cargo = repo / "Cargo.toml"
+
+    pyproject_text = pyproject.read_text(errors="ignore") if pyproject.exists() else ""
+    requirements_text = requirements.read_text(errors="ignore") if requirements.exists() else ""
+    package_json_text = package_json.read_text(errors="ignore") if package_json.exists() else ""
+
+    has_pytest = "pytest" in pyproject_text or "pytest" in requirements_text
+    has_go = go_mod.exists()
+    has_node = package_json.exists()
+    has_jest = "jest" in package_json_text
+    has_rust = cargo.exists()
+
+    return TestEnvironment(
+        has_pytest=has_pytest,
+        has_go=has_go,
+        has_jest=has_jest,
+        has_node=has_node,
+        has_rust=has_rust,
+    )
 
 
 def _run_command(command: str, cwd: Path, timeout_seconds: int) -> ValidationExecutionResult:
@@ -69,6 +105,43 @@ def _render_command(template: str, item: dict[str, Any]) -> str:
     )
 
 
+def _infer_fallback_commands(item: dict[str, Any], env: TestEnvironment) -> list[str]:
+    test_file = str(item.get("test_file_suggestion", "")).strip()
+    test_name = str(item.get("test_name", "")).strip()
+
+    if test_file.endswith(".py") and env.has_pytest:
+        file_part = shlex.quote(test_file) if test_file else ""
+        name_part = f" -k {shlex.quote(test_name)}" if test_name else ""
+        return [f"pytest {file_part}{name_part}".strip()]
+
+    if test_file.endswith(".go") and env.has_go:
+        name_part = f" -run {shlex.quote(test_name)}" if test_name else ""
+        return [f"go test ./...{name_part}".strip()]
+
+    if any(test_file.endswith(ext) for ext in [".ts", ".tsx", ".js", ".jsx"]) and env.has_node:
+        if env.has_jest:
+            file_part = f" {shlex.quote(test_file)}" if test_file else ""
+            name_part = f" -t {shlex.quote(test_name)}" if test_name else ""
+            return [f"npx jest{file_part}{name_part}".strip()]
+        return ["npm test -- --runInBand"]
+
+    if test_file.endswith(".rs") and env.has_rust:
+        name_part = f" {shlex.quote(test_name)}" if test_name else ""
+        return [f"cargo test{name_part}".strip()]
+
+    if env.has_pytest:
+        return ["pytest"]
+    if env.has_go:
+        return ["go test ./..."]
+    if env.has_jest:
+        return ["npx jest"]
+    if env.has_node:
+        return ["npm test"]
+    if env.has_rust:
+        return ["cargo test"]
+    return []
+
+
 def run_validation_execution(
     repo: Path,
     validation_items: list[dict[str, Any]],
@@ -77,12 +150,15 @@ def run_validation_execution(
     max_items: int,
 ) -> list[dict[str, Any]]:
     execution: list[dict[str, Any]] = []
+    env = detect_test_environment(repo)
 
     for item in validation_items[:max_items]:
         item_id = str(item.get("id", ""))
         commands = [str(c) for c in item.get("execution_commands", []) if str(c).strip()]
         if not commands and command_template:
             commands = [_render_command(command_template, item)]
+        if not commands:
+            commands = _infer_fallback_commands(item, env)
 
         if not commands:
             execution.append(

@@ -49,6 +49,19 @@ uv run secagent \
   --pr-base main
 ```
 
+Create multiple PRs split by vulnerability class/severity:
+
+```bash
+uv run secagent \
+  --repo /path/to/target/repo \
+  --run-validation \
+  --apply-fixes \
+  --create-pr \
+  --multi-pr-mode class-severity \
+  --multi-pr-limit 8 \
+  --pr-base main
+```
+
 Or with python module invocation:
 
 ```bash
@@ -79,8 +92,11 @@ Tune these for your environment:
 - validation execution results (if `--run-validation`)
 - fix application results (if `--apply-fixes`)
 - PR metadata (if `--create-pr`)
+- multi-PR metadata (if `--multi-pr-mode` is not `none`)
 
 ## Notes
 
 - Applying diffs requires the target repo to be a git repository.
 - By default, fix application refuses dirty repos; use `--allow-dirty-repo` to override.
+- PR creation runs in temporary git worktrees so your current working tree is not switched.
+- If validator commands are missing, secagent infers fallback test commands for common stacks (`pytest`, `go test`, `jest`/`npm test`, `cargo test`).
