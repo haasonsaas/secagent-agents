@@ -1,0 +1,107 @@
+profile_name: health
+profile_version: 1
+model: gpt-4.1
+max_file_bytes: 15000
+max_files: 160
+stage_timeout_seconds: 180
+max_validation_items: 120
+max_fix_items: 120
+use_context_cache: true
+include_globs:
+  - "**/*.py"
+  - "**/*.js"
+  - "**/*.ts"
+  - "**/*.go"
+  - "**/*.java"
+  - "**/*.rb"
+  - "**/*.sql"
+  - "**/*.yml"
+  - "**/*.yaml"
+  - "**/*.json"
+exclude_globs:
+  - "**/.git/**"
+  - "**/node_modules/**"
+  - "**/.venv/**"
+  - "**/dist/**"
+  - "**/build/**"
+
+vulnerability_classes:
+  - name: "BOLA/IDOR on Patient Records"
+    description: "Unauthorized cross-patient access to PHI and medical records."
+    detector_instructions: |
+      Prioritize endpoints reading/writing patient records, labs, notes, claims, and attachments.
+      Verify strict patient/org scoping checks at every object access and list query.
+      Include attacker/victim sequence with concrete identifiers.
+    manager_checks:
+      - "Reject with proven patient/org scoping on exact code path."
+      - "Accept only with realistic cross-patient access impact."
+
+  - name: "Privilege Escalation in Clinical/Admin Workflows"
+    description: "Under-privileged users can execute clinician/admin actions due to missing authorization checks."
+    detector_instructions: |
+      Inspect role-restricted actions: chart signing, medication updates, claim approvals, admin policy edits.
+      Verify role checks are enforced server-side and bound to actor/resource/action.
+      Flag paths where authn is present but authz is missing.
+    manager_checks:
+      - "Reject if role enforcement is deterministic and verified in backend."
+      - "Accept with clear low-privilege to high-privilege action path."
+
+  - name: "PHI Exposure in Logs and Error Channels"
+    description: "Protected health information is leaked in logs, traces, and verbose errors."
+    detector_instructions: |
+      Track patient names, MRNs, diagnoses, medications, claims, and identifiers into logging/error sinks.
+      Verify masking/redaction before emission.
+      Prioritize centralized middleware and exception handlers.
+    manager_checks:
+      - "Reject if redaction is guaranteed before sink and testable."
+      - "Accept when plaintext PHI can be written to logs/errors."
+
+  - name: "Insecure File Upload/Download for Medical Documents"
+    description: "Unsafe handling of uploaded medical documents enables traversal, XSS, or malware persistence."
+    detector_instructions: |
+      Review document upload/download endpoints for MIME/content validation and safe storage/serving.
+      Check traversal protections and content-disposition safety.
+      Focus on PDFs/images/attachments used in clinician workflows.
+    manager_checks:
+      - "Reject when server-side validation + safe serving controls are comprehensive."
+      - "Accept with realistic harmful rendering/execution path."
+
+  - name: "SQL/NoSQL Injection in Patient Search and Reporting"
+    description: "Unsanitized filters in patient lookup/report endpoints enable query manipulation."
+    detector_instructions: |
+      Inspect dynamic filters/sorts in patient search, scheduling, and reporting APIs.
+      Verify parameterization/allow-listing for dynamic fields.
+      Provide plausible payload and data impact.
+    manager_checks:
+      - "Reject with strict parameterization and allow-listing."
+      - "Accept when attacker input can alter query structure/semantics."
+
+  - name: "Insecure API Integrations (EHR/FHIR/Webhooks)"
+    description: "Weak signature, token validation, or scope checks in healthcare integration endpoints."
+    detector_instructions: |
+      Review inbound webhook and FHIR/EHR integration handlers.
+      Verify signature/timestamp/replay checks and scoped token validation.
+      Flag permissive fallback behavior processing failed verification.
+    manager_checks:
+      - "Reject if strict verification gates processing deterministically."
+      - "Accept when forged/replayed external events can change patient/system state."
+
+  - name: "Broken Session/Token Handling in Patient Portals"
+    description: "Weak token/session validation allows session fixation, replay, or account takeover."
+    detector_instructions: |
+      Inspect auth/session code for token rotation, signature validation, expiry, nonce binding, and revocation checks.
+      Prioritize password reset, MFA, and portal access flows.
+      Identify insecure defaults and missing claim validation.
+    manager_checks:
+      - "Reject if token/session controls are complete and consistently enforced."
+      - "Accept when replay/fixation/forgery can realistically compromise accounts."
+
+  - name: "Secrets in Healthcare Config and IaC"
+    description: "Hardcoded credentials/secrets in source/config expose integration and patient-data systems."
+    detector_instructions: |
+      Scan code/config for API tokens, private keys, DB creds, and service-account secrets.
+      Distinguish placeholders from production-like credential material.
+      Prioritize secrets with access to PHI stores and integration brokers.
+    manager_checks:
+      - "Reject obvious fake placeholders and non-usable samples."
+      - "Accept with high-confidence secret evidence and plausible abuse path."

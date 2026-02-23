@@ -39,6 +39,18 @@ class ManagerOutput(BaseModel):
     rejected: list[RejectedFinding] = Field(default_factory=list)
 
 
+class ExploitabilityItem(BaseModel):
+    id: str
+    exploitability_score: float
+    attacker_preconditions: list[str] = Field(default_factory=list)
+    asset_impact: str
+    confidence_rationale: str
+
+
+class ExploitabilityOutput(BaseModel):
+    assessments: list[ExploitabilityItem] = Field(default_factory=list)
+
+
 class ValidationItem(BaseModel):
     id: str
     test_file_suggestion: str

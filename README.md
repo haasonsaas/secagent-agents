@@ -27,6 +27,8 @@ Use built-in profile shortcuts:
 ```bash
 uv run secagent --repo /path/to/target/repo --profile general
 uv run secagent --repo /path/to/target/repo --profile llm
+uv run secagent --repo /path/to/target/repo --profile fintech
+uv run secagent --repo /path/to/target/repo --profile health
 ```
 
 CI gate example:
@@ -64,6 +66,18 @@ uv run secagent \
   --apply-fixes \
   --create-pr \
   --pr-base main
+```
+
+Enable patch guardrails:
+
+```bash
+uv run secagent \
+  --repo /path/to/target/repo \
+  --apply-fixes \
+  --guardrail-max-files 40 \
+  --guardrail-max-lines 800 \
+  --guardrail-protected-path auth/ \
+  --guardrail-protected-path migrations/
 ```
 
 Create multiple PRs split by vulnerability class/severity:
@@ -140,6 +154,16 @@ uv run secagent --repo /path/to/target/repo --sarif-out secagent.sarif --sarif-s
 uv run secagent --repo /path/to/target/repo --run-validation --sarif-out secagent.sarif --sarif-scope validated
 ```
 
+Validation gating:
+
+```bash
+# Require reproducibility before selecting fixes
+uv run secagent --repo /path/to/target/repo --run-validation --validation-gate pre
+
+# Local apply only: require reproducibility pre-fix and passing tests post-fix
+uv run secagent --repo /path/to/target/repo --run-validation --validation-gate pre-post --apply-fixes
+```
+
 The LLM profile goes deep on:
 
 - direct and indirect prompt injection
@@ -174,6 +198,7 @@ The default skills pack now includes deep coverage for:
 - Sensitive logging and hardcoded secrets
 - Race conditions on financial/quota flows
 - Insecure file upload/processing
+- Dedicated sector packs: fintech and health
 
 ## Output
 
@@ -196,3 +221,5 @@ The default skills pack now includes deep coverage for:
 - By default, fix application refuses dirty repos; use `--allow-dirty-repo` to override.
 - PR creation runs in temporary git worktrees so your current working tree is not switched.
 - If validator commands are missing, secagent infers fallback test commands for common stacks (`pytest`, `go test`, `jest`/`npm test`, `cargo test`).
+- Run artifacts are written per execution to `.secagent_runs/<run_id>/report.json`.
+- CI workflow is available at `.github/workflows/secagent.yml` for weekly + manual scans with SARIF upload.

@@ -1,6 +1,12 @@
+profile_name: llm
+profile_version: 1
 model: gpt-4.1
 max_file_bytes: 16000
 max_files: 180
+stage_timeout_seconds: 240
+max_validation_items: 120
+max_fix_items: 120
+use_context_cache: true
 include_globs:
   - "**/*.py"
   - "**/*.js"

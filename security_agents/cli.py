@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import argparse
-import json
 from collections import defaultdict
+import json
 from datetime import datetime, timezone
 from pathlib import Path
+import subprocess
+import uuid
 
 from security_agents.automation import (
     apply_fix_diffs,
     create_multi_prs_for_groups,
     create_pr_for_changes,
     ensure_clean_git_repo,
+    get_staged_diff_stats,
+    validate_patch_guardrails,
 )
 from security_agents.config import load_config
 from security_agents.execution import run_validation_execution
@@ -30,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repo", default=".", help="Path to target repository")
     parser.add_argument(
         "--profile",
-        choices=["general", "llm"],
+        choices=["general", "llm", "fintech", "health"],
         default="general",
         help="Built-in skill profile to use when --config is not set.",
     )
@@ -46,6 +50,11 @@ def parse_args() -> argparse.Namespace:
         choices=["accepted", "validated"],
         default=None,
         help="Scope of findings exported to SARIF. Defaults to validated when --run-validation is enabled, otherwise accepted.",
+    )
+    parser.add_argument(
+        "--artifacts-dir",
+        default=".secagent_runs",
+        help="Directory for per-run stage artifacts and metadata.",
     )
     parser.add_argument(
         "--summary-only",
@@ -88,9 +97,15 @@ def parse_args() -> argparse.Namespace:
         help="Execute validator-provided test commands against --repo.",
     )
     parser.add_argument(
+        "--validation-gate",
+        choices=["none", "pre", "pre-post"],
+        default="none",
+        help="Validation gate mode: pre (must reproduce before fix) or pre-post (must reproduce before and pass after apply).",
+    )
+    parser.add_argument(
         "--validation-command-template",
         default=None,
-        help="Fallback command template if validator does not provide execution_commands. Supports {id}, {test_file}, {test_name}.",
+        help="Fallback command template if validator does not provide execution_commands. Supports {id}, {test_file}, {test_name}, {project_root}.",
     )
     parser.add_argument(
         "--validation-timeout-seconds",
@@ -113,6 +128,29 @@ def parse_args() -> argparse.Namespace:
         "--allow-dirty-repo",
         action="store_true",
         help="Allow applying fixes in a repo with existing uncommitted changes.",
+    )
+    parser.add_argument(
+        "--guardrail-max-files",
+        type=int,
+        default=60,
+        help="Maximum number of changed files allowed in an automated patch.",
+    )
+    parser.add_argument(
+        "--guardrail-max-lines",
+        type=int,
+        default=1200,
+        help="Maximum added+deleted lines allowed in an automated patch.",
+    )
+    parser.add_argument(
+        "--guardrail-protected-path",
+        action="append",
+        default=["auth/", "security/", "crypto/", "migrations/"],
+        help="Path prefix that requires manual override if touched. Can be set multiple times.",
+    )
+    parser.add_argument(
+        "--allow-protected-paths",
+        action="store_true",
+        help="Allow automated patches to touch protected path prefixes.",
     )
     parser.add_argument(
         "--create-pr",
@@ -171,6 +209,13 @@ def _group_key_for_fix(fix: dict, lookup: dict[str, dict], mode: str) -> str:
     return "all"
 
 
+def _write_artifacts(artifacts_root: Path, run_id: str, payload: dict) -> Path:
+    run_dir = artifacts_root / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "report.json").write_text(json.dumps(payload, indent=2))
+    return run_dir
+
+
 def main() -> int:
     args = parse_args()
     repo = Path(args.repo).resolve()
@@ -181,16 +226,26 @@ def main() -> int:
         raise ValueError("--min-confidence must be between 0 and 1")
     if args.max_fixes is not None and args.max_fixes < 0:
         raise ValueError("--max-fixes must be >= 0")
+    if args.validation_gate != "none" and not args.run_validation:
+        raise ValueError("--validation-gate requires --run-validation")
+    if args.create_pr and not args.apply_fixes:
+        raise ValueError("--create-pr requires --apply-fixes")
+    if args.multi_pr_limit <= 0:
+        raise ValueError("--multi-pr-limit must be > 0")
 
     output = run_pipeline(repo, config)
+    run_id = uuid.uuid4().hex[:12]
     generated_at = datetime.now(timezone.utc).isoformat()
+
     severity_counts = {"low": 0, "medium": 0, "high": 0, "critical": 0}
     for finding in output.accepted_findings:
         severity_counts[finding_severity(finding)] += 1
     class_summary = summarize_findings_by_class(output.accepted_findings)
 
-    validation_execution: list[dict] = []
+    validation_execution_pre: list[dict] = []
+    validation_execution_post: list[dict] = []
     failed_validation_ids: set[str] = set()
+
     selected_fixes = filter_and_rank_fixes(
         accepted_findings=output.accepted_findings,
         fixes=output.fixes,
@@ -200,28 +255,26 @@ def main() -> int:
         max_fixes=args.max_fixes,
     )
     filtered_fixes = selected_fixes
+
     if args.run_validation:
-        validation_execution = run_validation_execution(
+        validation_execution_pre = run_validation_execution(
             repo=repo,
             validation_items=output.validation,
             command_template=args.validation_command_template,
             timeout_seconds=args.validation_timeout_seconds,
             max_items=args.validation_max_items,
         )
-        failed_ids = {item.get("id", "") for item in validation_execution if item.get("status") == "failed"}
-        failed_validation_ids = {str(item) for item in failed_ids}
-        if failed_ids:
-            filtered_fixes = [fix for fix in selected_fixes if str(fix.get("id", "")) in failed_ids]
-        else:
-            filtered_fixes = []
+        failed_validation_ids = {
+            str(item.get("id", "")) for item in validation_execution_pre if item.get("status") == "failed"
+        }
+        filtered_fixes = [fix for fix in selected_fixes if str(fix.get("id", "")) in failed_validation_ids]
+        if args.validation_gate in {"pre", "pre-post"} and not filtered_fixes:
+            raise RuntimeError("Validation gate failed: no findings reproduced pre-fix.")
 
     apply_results: list[dict] = []
     pr_result: dict | None = None
     pr_results: list[dict] = []
-    if args.create_pr and not args.apply_fixes:
-        raise ValueError("--create-pr requires --apply-fixes")
-    if args.multi_pr_limit <= 0:
-        raise ValueError("--multi-pr-limit must be > 0")
+    guardrail_stats: dict | None = None
 
     if args.apply_fixes and not args.create_pr:
         if not args.allow_dirty_repo:
@@ -229,10 +282,40 @@ def main() -> int:
             if not clean:
                 raise RuntimeError(f"Refusing to apply fixes: {reason}. Use --allow-dirty-repo to override.")
         apply_results = apply_fix_diffs(repo, filtered_fixes)
+        add_all = subprocess.run(["git", "add", "-A"], cwd=str(repo), capture_output=True, text=True)
+        if add_all.returncode != 0:
+            raise RuntimeError(add_all.stderr.strip() or "git add failed after patch apply")
+        guardrail_stats = get_staged_diff_stats(repo)
+        passed, reason = validate_patch_guardrails(
+            stats=guardrail_stats,
+            max_files=args.guardrail_max_files,
+            max_changed_lines=args.guardrail_max_lines,
+            deny_path_prefixes=args.guardrail_protected_path,
+            allow_protected_paths=args.allow_protected_paths,
+        )
+        if not passed:
+            raise RuntimeError(f"Patch guardrail failed: {reason}")
+
+        if args.validation_gate == "pre-post":
+            fixed_ids = {str(item.get("id", "")) for item in apply_results if item.get("applied")}
+            target_validation = [item for item in output.validation if str(item.get("id", "")) in fixed_ids]
+            validation_execution_post = run_validation_execution(
+                repo=repo,
+                validation_items=target_validation,
+                command_template=args.validation_command_template,
+                timeout_seconds=args.validation_timeout_seconds,
+                max_items=args.validation_max_items,
+            )
+            not_passing = [item for item in validation_execution_post if item.get("status") != "passed"]
+            if not_passing:
+                raise RuntimeError("Validation gate failed: some fixed findings did not pass post-fix validation.")
 
     if args.create_pr:
+        if args.validation_gate == "pre-post":
+            raise RuntimeError("--validation-gate pre-post is only supported for local --apply-fixes runs (without --create-pr).")
         if not filtered_fixes:
             raise RuntimeError("No fixes selected; refusing to create PR.")
+
         if args.multi_pr_mode == "none":
             pr_result = create_pr_for_changes(
                 repo=repo,
@@ -243,10 +326,15 @@ def main() -> int:
                 draft=args.pr_draft,
                 commit_message=args.commit_message,
                 fixes=filtered_fixes,
+                max_files=args.guardrail_max_files,
+                max_changed_lines=args.guardrail_max_lines,
+                deny_path_prefixes=args.guardrail_protected_path,
+                allow_protected_paths=args.allow_protected_paths,
             )
             if not pr_result.get("ok"):
                 raise RuntimeError(f"PR creation failed: {pr_result.get('error', 'unknown error')}")
             apply_results = list(pr_result.get("apply_results", []))
+            guardrail_stats = pr_result.get("diff_stats")
         else:
             lookup = _build_fix_lookup(output.accepted_findings)
             grouped: dict[str, list[dict]] = defaultdict(list)
@@ -266,14 +354,33 @@ def main() -> int:
                 body_prefix=args.pr_body,
                 draft=args.pr_draft,
                 commit_message_prefix=args.commit_message,
+                max_files=args.guardrail_max_files,
+                max_changed_lines=args.guardrail_max_lines,
+                deny_path_prefixes=args.guardrail_protected_path,
+                allow_protected_paths=args.allow_protected_paths,
             )
             if not any(item.get("ok") for item in pr_results):
                 raise RuntimeError("Multi-PR creation failed for all groups.")
 
     payload = {
+        "run_id": run_id,
         "generated_at": generated_at,
         "repo": str(repo),
+        "profile": args.profile,
+        "profile_name": config.profile_name,
+        "profile_version": config.profile_version,
+        "config_path": str(config_path),
         "model": config.model,
+        "context_cache": {
+            "enabled": config.use_context_cache,
+            "hit": output.context_cache_hit,
+            "key": output.context_cache_key,
+        },
+        "budgets": {
+            "stage_timeout_seconds": config.stage_timeout_seconds,
+            "max_validation_items": config.max_validation_items,
+            "max_fix_items": config.max_fix_items,
+        },
         "scanned_file_count": len(output.scanned_files),
         "scanned_files": output.scanned_files,
         "severity_counts": severity_counts,
@@ -285,21 +392,31 @@ def main() -> int:
             "max_fixes": args.max_fixes,
             "selected_fix_count_pre_validation": len(selected_fixes),
         },
+        "guardrails": {
+            "max_files": args.guardrail_max_files,
+            "max_lines": args.guardrail_max_lines,
+            "protected_paths": args.guardrail_protected_path,
+            "allow_protected_paths": args.allow_protected_paths,
+            "diff_stats": guardrail_stats,
+        },
         "accepted_findings": output.accepted_findings,
         "rejected_findings": [] if args.summary_only else output.rejected_findings,
         "validation": [] if args.summary_only else output.validation,
         "fixes": [] if args.summary_only else output.fixes,
-        "validation_execution": validation_execution,
+        "validation_execution_pre": validation_execution_pre,
+        "validation_execution_post": validation_execution_post,
         "fixes_selected_after_validation": filtered_fixes,
         "fix_application": apply_results,
+        "stage_artifacts": output.stage_artifacts,
         "pr": pr_result,
         "prs": pr_results,
     }
 
     out_path = Path(args.out)
     out_path.write_text(json.dumps(payload, indent=2))
+
+    sarif_scope = args.sarif_scope or ("validated" if args.run_validation else "accepted")
     if args.sarif_out:
-        sarif_scope = args.sarif_scope or ("validated" if args.run_validation else "accepted")
         if sarif_scope == "validated":
             sarif_findings = [
                 finding
@@ -311,7 +428,12 @@ def main() -> int:
         sarif_payload = findings_to_sarif(sarif_findings)
         Path(args.sarif_out).write_text(json.dumps(sarif_payload, indent=2))
 
+    artifacts_root = Path(args.artifacts_dir)
+    artifact_dir = _write_artifacts(artifacts_root, run_id, payload)
+
+    print(f"Run ID: {run_id}")
     print(f"Wrote report: {out_path}")
+    print(f"Wrote artifacts: {artifact_dir}")
     if args.sarif_out:
         print(f"Wrote SARIF: {args.sarif_out}")
     print(f"Accepted findings: {len(output.accepted_findings)}")
@@ -320,8 +442,10 @@ def main() -> int:
     print(f"Fix plans: {len(output.fixes)}")
     print(f"Fixes selected (pre-validation): {len(selected_fixes)}")
     if args.run_validation:
-        print(f"Validation execution items: {len(validation_execution)}")
+        print(f"Validation execution (pre): {len(validation_execution_pre)}")
         print(f"Fixes selected after validation execution: {len(filtered_fixes)}")
+        if validation_execution_post:
+            print(f"Validation execution (post): {len(validation_execution_post)}")
     if args.apply_fixes:
         applied_count = sum(1 for item in apply_results if item.get("applied"))
         print(f"Fixes applied: {applied_count}/{len(apply_results)}")

@@ -5,6 +5,8 @@ from pathlib import Path
 PROFILE_CONFIGS = {
     "general": Path("skills/default_security_skills.yaml"),
     "llm": Path("skills/llm_security_skills.yaml"),
+    "fintech": Path("skills/fintech_security_skills.yaml"),
+    "health": Path("skills/health_security_skills.yaml"),
 }
 
 

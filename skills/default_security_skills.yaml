@@ -1,6 +1,12 @@
+profile_name: general
+profile_version: 2
 model: gpt-4.1
 max_file_bytes: 14000
 max_files: 140
+stage_timeout_seconds: 180
+max_validation_items: 100
+max_fix_items: 100
+use_context_cache: true
 include_globs:
   - "**/*.py"
   - "**/*.js"

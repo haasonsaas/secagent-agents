@@ -35,6 +35,30 @@ def _help_uri_for_class(vuln_class: str) -> str:
     return "https://owasp.org/www-project-top-ten/"
 
 
+def _cwe_tags_for_class(vuln_class: str) -> list[str]:
+    name = vuln_class.lower()
+    tags = ["security"]
+    if "idor" in name or "bola" in name:
+        tags.extend(["CWE-639", "CWE-285"])
+    if "ssrf" in name:
+        tags.append("CWE-918")
+    if "xss" in name:
+        tags.append("CWE-79")
+    if "csrf" in name:
+        tags.append("CWE-352")
+    if "sql" in name or "injection" in name:
+        tags.append("CWE-89")
+    if "deserialization" in name:
+        tags.append("CWE-502")
+    if "path traversal" in name:
+        tags.append("CWE-22")
+    if "command injection" in name:
+        tags.append("CWE-78")
+    if "prompt" in name or "llm" in name or "agent" in name:
+        tags.append("OWASP-LLM")
+    return list(dict.fromkeys(tags))
+
+
 def _finding_fingerprint(vuln_class: str, nested: dict[str, Any]) -> str:
     raw = "|".join(
         [
@@ -78,7 +102,7 @@ def findings_to_sarif(findings: list[dict[str, Any]], tool_name: str = "secagent
                     "text": f"Finding class: {vuln_class}. Default remediation: {help_text}",
                 },
                 "properties": {
-                    "tags": ["security", vuln_class],
+                    "tags": _cwe_tags_for_class(vuln_class) + [vuln_class],
                     "precision": "medium",
                     "problem.severity": "warning",
                 },

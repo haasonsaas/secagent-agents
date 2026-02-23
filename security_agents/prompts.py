@@ -21,6 +21,10 @@ VALIDATOR_SYSTEM = """You are a security validator focused on test-driven confir
 For each accepted finding, provide integration-style test ideas and exact test assertions.
 Make validation steps executable and precise."""
 
+EXPLOITABILITY_SYSTEM = """You are an exploitability scorer for security findings.
+Produce structured, realistic attacker preconditions and impact assessments.
+Be conservative and avoid inflated scores."""
+
 FIXER_SYSTEM = """You are a security fixer.
 Produce minimal, low-risk remediation plans and code patch diffs for validated vulnerabilities.
 Keep changes focused and avoid broad refactors."""
@@ -104,6 +108,29 @@ Return JSON:
       "assertions": ["..."],
       "execution_commands": ["pytest tests/path.py -k test_name"],
       "expected_failure_before_fix": "what should fail"
+    }}
+  ]
+}}
+
+Code context:
+{code_context}
+""".strip()
+
+
+def exploitability_user_prompt(accepted_findings_json: str, code_context: str) -> str:
+    return f"""
+Score exploitability for these accepted findings:
+{accepted_findings_json}
+
+Return JSON:
+{{
+  "assessments": [
+    {{
+      "id": "short-id",
+      "exploitability_score": 0.0,
+      "attacker_preconditions": ["..."],
+      "asset_impact": "what could be impacted",
+      "confidence_rationale": "why this score is justified"
     }}
   ]
 }}

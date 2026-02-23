@@ -1,0 +1,74 @@
+name: secagent
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Profile to run"
+        required: false
+        default: "general"
+        type: choice
+        options:
+          - general
+          - llm
+          - fintech
+          - health
+      fail_on_severity:
+        description: "Fail threshold"
+        required: false
+        default: "high"
+        type: choice
+        options:
+          - low
+          - medium
+          - high
+          - critical
+  schedule:
+    - cron: "0 12 * * 1"
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync dependencies
+        run: uv sync --dev
+
+      - name: Run secagent
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          PROFILE="${{ inputs.profile || 'general' }}"
+          FAIL_ON="${{ inputs.fail_on_severity || 'high' }}"
+          uv run secagent \
+            --repo . \
+            --profile "$PROFILE" \
+            --summary-only \
+            --fail-on-severity "$FAIL_ON" \
+            --sarif-out secagent.sarif \
+            --out security_report.json
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: secagent.sarif
+
+      - name: Upload run artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: secagent-run
+          path: |
+            security_report.json
+            secagent.sarif
+            .secagent_runs/

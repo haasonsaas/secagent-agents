@@ -1,0 +1,107 @@
+profile_name: fintech
+profile_version: 1
+model: gpt-4.1
+max_file_bytes: 15000
+max_files: 160
+stage_timeout_seconds: 180
+max_validation_items: 120
+max_fix_items: 120
+use_context_cache: true
+include_globs:
+  - "**/*.py"
+  - "**/*.js"
+  - "**/*.ts"
+  - "**/*.go"
+  - "**/*.java"
+  - "**/*.rb"
+  - "**/*.sql"
+  - "**/*.yml"
+  - "**/*.yaml"
+  - "**/*.json"
+exclude_globs:
+  - "**/.git/**"
+  - "**/node_modules/**"
+  - "**/.venv/**"
+  - "**/dist/**"
+  - "**/build/**"
+
+vulnerability_classes:
+  - name: "BOLA/IDOR on Financial Objects"
+    description: "Cross-tenant access to transactions, payouts, cards, invoices, or balances."
+    detector_instructions: |
+      Prioritize reads/writes involving financial objects and ledger-adjacent records.
+      Verify tenant/account ownership checks on all object fetches and mutations.
+      Flag list endpoints missing per-object authorization filtering.
+    manager_checks:
+      - "Reject if strict ownership checks are guaranteed on same path."
+      - "Accept only with practical cross-tenant access scenario and impact."
+
+  - name: "Authorization Bypass on Money Movement"
+    description: "Insufficient authorization allows low-privilege actors to trigger transfer/disbursement/refund actions."
+    detector_instructions: |
+      Identify transfer/refund/disbursement state transitions and approval workflows.
+      Verify role checks, separation of duties, and policy gates before action execution.
+      Check fallback/internal endpoints for missing authz.
+    manager_checks:
+      - "Reject where role/approval checks are deterministic and enforced server-side."
+      - "Accept only with end-to-end unauthorized action path."
+
+  - name: "Race Condition in Balance or Limit Enforcement"
+    description: "Concurrent requests bypass balance, spending limits, or idempotency controls."
+    detector_instructions: |
+      Find read-check-write flows around balances, quotas, and approvals.
+      Verify atomic DB constraints, transactions, and idempotency keys.
+      Include concurrent exploit sequence violating invariant.
+    manager_checks:
+      - "Reject if DB constraints + transaction isolation prevent invariant breaks."
+      - "Accept when concurrent calls can produce double-spend or duplicate settlement effects."
+
+  - name: "Ledger Integrity and Reconciliation Gaps"
+    description: "State transitions can diverge from ledger/audit records due to missing integrity checks."
+    detector_instructions: |
+      Track creation and mutation of financial state and corresponding ledger/audit writes.
+      Flag non-atomic updates where ledger writes may be skipped or inconsistent.
+      Prioritize reversal/chargeback/correction flows.
+    manager_checks:
+      - "Reject if transactional integrity guarantees coupled writes."
+      - "Accept only when inconsistent balances/history can be produced by API paths."
+
+  - name: "Webhook Signature Verification Weakness"
+    description: "Payment/provider webhooks accepted without robust signature, timestamp, and replay validation."
+    detector_instructions: |
+      Inspect webhook handlers for signature checks, canonicalization, clock tolerance, and nonce/replay controls.
+      Verify secret rotation support and algorithm pinning.
+      Flag best-effort verification that still processes events on failure.
+    manager_checks:
+      - "Reject if strict signature + replay controls are enforced before processing."
+      - "Accept when forged/replayed webhooks can trigger state changes."
+
+  - name: "Token/Credential Exposure in Logs"
+    description: "Sensitive financial/account tokens or PII are logged in plaintext."
+    detector_instructions: |
+      Trace auth headers, payment tokens, account numbers, and personal data through logging paths.
+      Verify masking/redaction utilities are used consistently.
+      Prioritize error handlers and request dumps.
+    manager_checks:
+      - "Reject if redaction is guaranteed prior to sink."
+      - "Accept when plaintext sensitive values can be persisted to logs."
+
+  - name: "SQL/NoSQL Injection in Reporting or Search"
+    description: "Untrusted inputs alter query semantics in transaction/reporting endpoints."
+    detector_instructions: |
+      Focus on dynamic filters/order/group fields used in reporting/search APIs.
+      Verify binding/allow-listing for dynamic query parts.
+      Include payload shape and likely data impact.
+    manager_checks:
+      - "Reject with proven parameterization/allow-lists."
+      - "Accept when attacker-controlled input changes query semantics."
+
+  - name: "Secrets in Financial Integration Config"
+    description: "API keys/private keys for financial providers exposed in source/config."
+    detector_instructions: |
+      Scan for gateway/bank/provider credentials in code, IaC, and env templates.
+      Distinguish placeholders from high-confidence secrets.
+      Prioritize write-capable or production credentials.
+    manager_checks:
+      - "Reject fake/test placeholders and unusable blobs."
+      - "Accept with high-confidence credential evidence and abuse potential."

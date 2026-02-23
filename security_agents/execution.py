@@ -16,6 +16,7 @@ class ValidationExecutionResult:
     stdout: str
     stderr: str
     error: str | None
+    cwd: str
 
 
 @dataclass
@@ -25,6 +26,9 @@ class TestEnvironment:
     has_jest: bool
     has_node: bool
     has_rust: bool
+
+
+MANIFEST_FILES = ["pyproject.toml", "go.mod", "package.json", "Cargo.toml", "requirements.txt"]
 
 
 def detect_test_environment(repo: Path) -> TestEnvironment:
@@ -53,6 +57,21 @@ def detect_test_environment(repo: Path) -> TestEnvironment:
     )
 
 
+def _find_project_root(repo: Path, test_file: str) -> Path:
+    candidate = (repo / test_file).resolve()
+    if not candidate.exists():
+        return repo
+    current = candidate.parent
+    repo_resolved = repo.resolve()
+    while str(current).startswith(str(repo_resolved)):
+        if any((current / name).exists() for name in MANIFEST_FILES):
+            return current
+        if current == repo_resolved:
+            break
+        current = current.parent
+    return repo
+
+
 def _run_command(command: str, cwd: Path, timeout_seconds: int) -> ValidationExecutionResult:
     try:
         completed = subprocess.run(
@@ -73,6 +92,7 @@ def _run_command(command: str, cwd: Path, timeout_seconds: int) -> ValidationExe
             stdout=exc.stdout or "",
             stderr=exc.stderr or "",
             error=f"timeout after {timeout_seconds}s",
+            cwd=str(cwd),
         )
     except Exception as exc:  # pragma: no cover - defensive
         return ValidationExecutionResult(
@@ -83,6 +103,7 @@ def _run_command(command: str, cwd: Path, timeout_seconds: int) -> ValidationExe
             stdout="",
             stderr="",
             error=str(exc),
+            cwd=str(cwd),
         )
 
     status = "failed" if completed.returncode != 0 else "passed"
@@ -94,14 +115,16 @@ def _run_command(command: str, cwd: Path, timeout_seconds: int) -> ValidationExe
         stdout=completed.stdout,
         stderr=completed.stderr,
         error=None,
+        cwd=str(cwd),
     )
 
 
-def _render_command(template: str, item: dict[str, Any]) -> str:
+def _render_command(template: str, item: dict[str, Any], project_root: Path) -> str:
     return template.format(
         id=item.get("id", ""),
         test_file=item.get("test_file_suggestion", ""),
         test_name=item.get("test_name", ""),
+        project_root=str(project_root),
     )
 
 
@@ -154,9 +177,11 @@ def run_validation_execution(
 
     for item in validation_items[:max_items]:
         item_id = str(item.get("id", ""))
+        test_file = str(item.get("test_file_suggestion", "")).strip()
+        project_root = _find_project_root(repo, test_file)
         commands = [str(c) for c in item.get("execution_commands", []) if str(c).strip()]
         if not commands and command_template:
-            commands = [_render_command(command_template, item)]
+            commands = [_render_command(command_template, item, project_root)]
         if not commands:
             commands = _infer_fallback_commands(item, env)
 
@@ -174,7 +199,7 @@ def run_validation_execution(
         results: list[dict[str, Any]] = []
         final_status = "passed"
         for command in commands:
-            result = _run_command(command=command, cwd=repo, timeout_seconds=timeout_seconds)
+            result = _run_command(command=command, cwd=project_root, timeout_seconds=timeout_seconds)
             result.id = item_id
             result_payload = {
                 "id": result.id,
@@ -184,6 +209,7 @@ def run_validation_execution(
                 "stdout": result.stdout,
                 "stderr": result.stderr,
                 "error": result.error,
+                "cwd": result.cwd,
             }
             results.append(result_payload)
             if result.status == "failed":

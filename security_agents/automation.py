@@ -60,6 +60,59 @@ def apply_fix_diffs(repo: Path, fixes: list[dict[str, Any]]) -> list[dict[str, A
     return results
 
 
+def get_staged_diff_stats(repo: Path) -> dict[str, Any]:
+    diff = _run(["git", "diff", "--cached", "--numstat"], cwd=repo)
+    if diff.returncode != 0:
+        return {"files": 0, "added": 0, "deleted": 0, "paths": [], "error": diff.stderr.strip()}
+
+    files = 0
+    added = 0
+    deleted = 0
+    paths: list[str] = []
+    for line in diff.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        add_s, del_s, path = parts[0], parts[1], parts[2]
+        files += 1
+        paths.append(path)
+        try:
+            added += int(add_s)
+        except ValueError:
+            pass
+        try:
+            deleted += int(del_s)
+        except ValueError:
+            pass
+    return {"files": files, "added": added, "deleted": deleted, "paths": paths}
+
+
+def validate_patch_guardrails(
+    stats: dict[str, Any],
+    max_files: int | None,
+    max_changed_lines: int | None,
+    deny_path_prefixes: list[str],
+    allow_protected_paths: bool,
+) -> tuple[bool, str]:
+    files = int(stats.get("files", 0))
+    changed_lines = int(stats.get("added", 0)) + int(stats.get("deleted", 0))
+    paths = [str(p) for p in stats.get("paths", [])]
+
+    if max_files is not None and files > max_files:
+        return False, f"changed file count {files} exceeds max_files {max_files}"
+    if max_changed_lines is not None and changed_lines > max_changed_lines:
+        return False, f"changed lines {changed_lines} exceed max_changed_lines {max_changed_lines}"
+
+    if deny_path_prefixes and not allow_protected_paths:
+        for path in paths:
+            for prefix in deny_path_prefixes:
+                normalized = prefix.strip()
+                if normalized and path.startswith(normalized):
+                    return False, f"patch touches protected path '{normalized}' (file: {path})"
+
+    return True, ""
+
+
 def _create_pr_with_worktree(
     repo: Path,
     base: str,
@@ -69,6 +122,10 @@ def _create_pr_with_worktree(
     draft: bool,
     commit_message: str,
     fixes: list[dict[str, Any]],
+    max_files: int | None,
+    max_changed_lines: int | None,
+    deny_path_prefixes: list[str],
+    allow_protected_paths: bool,
 ) -> dict[str, Any]:
     temp_dir = Path(tempfile.mkdtemp(prefix="secagent-pr-"))
     try:
@@ -92,6 +149,17 @@ def _create_pr_with_worktree(
         add_changes = _run(["git", "add", "-A"], cwd=temp_dir)
         if add_changes.returncode != 0:
             return {"ok": False, "error": add_changes.stderr.strip() or "git add failed", "apply_results": apply_results}
+
+        stats = get_staged_diff_stats(temp_dir)
+        passed, reason = validate_patch_guardrails(
+            stats=stats,
+            max_files=max_files,
+            max_changed_lines=max_changed_lines,
+            deny_path_prefixes=deny_path_prefixes,
+            allow_protected_paths=allow_protected_paths,
+        )
+        if not passed:
+            return {"ok": False, "error": f"guardrail failed: {reason}", "apply_results": apply_results, "diff_stats": stats}
 
         commit = _run(["git", "commit", "-m", commit_message], cwd=temp_dir)
         if commit.returncode != 0:
@@ -121,6 +189,7 @@ def _create_pr_with_worktree(
             "branch": branch,
             "pr_url": pr.stdout.strip(),
             "apply_results": apply_results,
+            "diff_stats": stats,
         }
     finally:
         _run(["git", "worktree", "remove", "--force", str(temp_dir)], cwd=repo)
@@ -136,6 +205,10 @@ def create_pr_for_changes(
     draft: bool,
     commit_message: str,
     fixes: list[dict[str, Any]],
+    max_files: int | None,
+    max_changed_lines: int | None,
+    deny_path_prefixes: list[str],
+    allow_protected_paths: bool,
 ) -> dict[str, Any]:
     final_branch = branch or f"secagent/auto-fixes-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
     return _create_pr_with_worktree(
@@ -147,6 +220,10 @@ def create_pr_for_changes(
         draft=draft,
         commit_message=commit_message,
         fixes=fixes,
+        max_files=max_files,
+        max_changed_lines=max_changed_lines,
+        deny_path_prefixes=deny_path_prefixes,
+        allow_protected_paths=allow_protected_paths,
     )
 
 
@@ -158,6 +235,10 @@ def create_multi_prs_for_groups(
     body_prefix: str,
     draft: bool,
     commit_message_prefix: str,
+    max_files: int | None,
+    max_changed_lines: int | None,
+    deny_path_prefixes: list[str],
+    allow_protected_paths: bool,
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     now = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
@@ -184,6 +265,10 @@ def create_multi_prs_for_groups(
             draft=draft,
             commit_message=commit_message,
             fixes=fixes,
+            max_files=max_files,
+            max_changed_lines=max_changed_lines,
+            deny_path_prefixes=deny_path_prefixes,
+            allow_protected_paths=allow_protected_paths,
         )
         created["label"] = label
         created["fix_count"] = len(fixes)
