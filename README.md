@@ -126,6 +126,20 @@ uv run secagent \
   --sarif-out secagent.sarif
 ```
 
+Control SARIF scope explicitly:
+
+```bash
+# default scope: accepted findings
+uv run secagent --repo /path/to/target/repo --sarif-out secagent.sarif
+
+# with validation enabled, default scope becomes validated findings
+uv run secagent --repo /path/to/target/repo --run-validation --sarif-out secagent.sarif
+
+# force scope
+uv run secagent --repo /path/to/target/repo --sarif-out secagent.sarif --sarif-scope accepted
+uv run secagent --repo /path/to/target/repo --run-validation --sarif-out secagent.sarif --sarif-scope validated
+```
+
 The LLM profile goes deep on:
 
 - direct and indirect prompt injection

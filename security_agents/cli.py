@@ -39,7 +39,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sarif-out",
         default=None,
-        help="Optional SARIF output path for accepted findings (e.g. secagent.sarif).",
+        help="Optional SARIF output path (e.g. secagent.sarif).",
+    )
+    parser.add_argument(
+        "--sarif-scope",
+        choices=["accepted", "validated"],
+        default=None,
+        help="Scope of findings exported to SARIF. Defaults to validated when --run-validation is enabled, otherwise accepted.",
     )
     parser.add_argument(
         "--summary-only",
@@ -184,6 +190,7 @@ def main() -> int:
     class_summary = summarize_findings_by_class(output.accepted_findings)
 
     validation_execution: list[dict] = []
+    failed_validation_ids: set[str] = set()
     selected_fixes = filter_and_rank_fixes(
         accepted_findings=output.accepted_findings,
         fixes=output.fixes,
@@ -202,6 +209,7 @@ def main() -> int:
             max_items=args.validation_max_items,
         )
         failed_ids = {item.get("id", "") for item in validation_execution if item.get("status") == "failed"}
+        failed_validation_ids = {str(item) for item in failed_ids}
         if failed_ids:
             filtered_fixes = [fix for fix in selected_fixes if str(fix.get("id", "")) in failed_ids]
         else:
@@ -291,7 +299,16 @@ def main() -> int:
     out_path = Path(args.out)
     out_path.write_text(json.dumps(payload, indent=2))
     if args.sarif_out:
-        sarif_payload = findings_to_sarif(output.accepted_findings)
+        sarif_scope = args.sarif_scope or ("validated" if args.run_validation else "accepted")
+        if sarif_scope == "validated":
+            sarif_findings = [
+                finding
+                for finding in output.accepted_findings
+                if str(finding.get("id", "")) in failed_validation_ids
+            ]
+        else:
+            sarif_findings = output.accepted_findings
+        sarif_payload = findings_to_sarif(sarif_findings)
         Path(args.sarif_out).write_text(json.dumps(sarif_payload, indent=2))
 
     print(f"Wrote report: {out_path}")

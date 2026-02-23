@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import re
 from typing import Any
 
 
@@ -12,6 +14,39 @@ def _normalize_severity(sev: str) -> str:
     return "note"
 
 
+def _slug(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "unknown"
+
+
+def _help_uri_for_class(vuln_class: str) -> str:
+    name = vuln_class.lower()
+    if "idor" in name or "bola" in name:
+        return "https://owasp.org/API-Security/editions/2023/en/0xa1-broken-object-level-authorization/"
+    if "ssrf" in name:
+        return "https://owasp.org/www-community/attacks/Server_Side_Request_Forgery"
+    if "xss" in name:
+        return "https://owasp.org/www-community/attacks/xss/"
+    if "csrf" in name:
+        return "https://owasp.org/www-community/attacks/csrf"
+    if "sql" in name or "injection" in name:
+        return "https://owasp.org/www-community/attacks/SQL_Injection"
+    if "prompt" in name or "llm" in name or "agent" in name:
+        return "https://genai.owasp.org/llm-top-10/"
+    return "https://owasp.org/www-project-top-ten/"
+
+
+def _finding_fingerprint(vuln_class: str, nested: dict[str, Any]) -> str:
+    raw = "|".join(
+        [
+            vuln_class,
+            str(nested.get("file", "")),
+            str(nested.get("line", "")),
+            str(nested.get("title", "")),
+        ]
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def findings_to_sarif(findings: list[dict[str, Any]], tool_name: str = "secagent") -> dict[str, Any]:
     rules: dict[str, dict[str, Any]] = {}
     results: list[dict[str, Any]] = []
@@ -20,22 +55,32 @@ def findings_to_sarif(findings: list[dict[str, Any]], tool_name: str = "secagent
         vuln_class = str(finding.get("vulnerability_class", "Unknown"))
         nested = finding.get("finding", {})
         finding_id = str(finding.get("id", nested.get("id", "unknown")))
-        rule_id = f"{vuln_class}:{finding_id}"
+        rule_id = f"secagent/{_slug(vuln_class)}"
 
         title = str(nested.get("title", vuln_class))
         summary = str(nested.get("summary", finding.get("rationale", "Security finding")))
         severity = str(finding.get("updated_severity", nested.get("severity", "low"))).lower()
+        confidence = nested.get("confidence", 0.0)
+        try:
+            confidence_value = max(0.0, min(1.0, float(confidence)))
+        except (TypeError, ValueError):
+            confidence_value = 0.0
+        help_text = str(nested.get("recommended_fix", "")).strip() or "Review authorization, validation, and safe handling controls."
 
         if rule_id not in rules:
             rules[rule_id] = {
                 "id": rule_id,
-                "name": title,
-                "shortDescription": {"text": title},
-                "fullDescription": {"text": summary},
+                "name": vuln_class,
+                "shortDescription": {"text": vuln_class},
+                "fullDescription": {"text": f"{vuln_class} detected by secagent."},
+                "helpUri": _help_uri_for_class(vuln_class),
+                "help": {
+                    "text": f"Finding class: {vuln_class}. Default remediation: {help_text}",
+                },
                 "properties": {
                     "tags": ["security", vuln_class],
                     "precision": "medium",
-                    "problem.severity": severity,
+                    "problem.severity": "warning",
                 },
             }
 
@@ -47,7 +92,16 @@ def findings_to_sarif(findings: list[dict[str, Any]], tool_name: str = "secagent
         result: dict[str, Any] = {
             "ruleId": rule_id,
             "level": _normalize_severity(severity),
-            "message": {"text": summary},
+            "message": {"text": f"[{finding_id}] {title}: {summary}"},
+            "partialFingerprints": {
+                "primaryLocationLineHash": _finding_fingerprint(vuln_class, nested),
+            },
+            "properties": {
+                "security-severity": severity,
+                "confidence": confidence_value,
+                "finding-id": finding_id,
+                "vulnerability-class": vuln_class,
+            },
         }
         if file_path:
             result["locations"] = [

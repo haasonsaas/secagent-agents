@@ -21,4 +21,6 @@ def test_findings_to_sarif_basic():
     assert run["tool"]["driver"]["name"] == "secagent"
     assert len(run["results"]) == 1
     assert run["results"][0]["level"] == "error"
+    assert run["results"][0]["ruleId"] == "secagent/sql-orm-injection"
+    assert "primaryLocationLineHash" in run["results"][0]["partialFingerprints"]
     assert run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "app/routes/search.py"
