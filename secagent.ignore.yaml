@@ -1,0 +1,6 @@
+# Example suppressions. Add expiration and reason for auditability.
+suppressions:
+  - vulnerability_class: "Open Redirect and Unvalidated Forward"
+    path_prefix: "legacy/"
+    expires_on: "2026-12-31"
+    reason: "Legacy module pending decommission; tracked in SEC-1234"

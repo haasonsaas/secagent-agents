@@ -37,6 +37,16 @@ CI gate example:
 uv run secagent --repo /path/to/target/repo --fail-on-severity high
 ```
 
+Fast PR scan (diff-aware):
+
+```bash
+uv run secagent \
+  --repo /path/to/target/repo \
+  --changed-only \
+  --changed-base origin/main \
+  --changed-radius 1
+```
+
 Prioritize only strong/high-impact fixes:
 
 ```bash
@@ -47,6 +57,15 @@ uv run secagent \
   --max-fixes 15
 ```
 
+Use policy-as-code defaults and suppressions:
+
+```bash
+uv run secagent \
+  --repo /path/to/target/repo \
+  --policy secagent.policy.yaml \
+  --suppressions secagent.ignore.yaml
+```
+
 Run validator command execution (test-executor stage):
 
 ```bash
@@ -54,6 +73,15 @@ uv run secagent \
   --repo /path/to/target/repo \
   --run-validation \
   --validation-command-template "pytest {test_file} -k {test_name}"
+```
+
+Run validation in isolated worktree:
+
+```bash
+uv run secagent \
+  --repo /path/to/target/repo \
+  --run-validation \
+  --validation-in-worktree
 ```
 
 Auto-apply fixes and open a PR:
@@ -106,6 +134,12 @@ uv sync --dev
 uv run pytest
 ```
 
+Benchmark fixtures:
+
+```bash
+uv run secagent --repo benchmarks/fixtures/python_idor --profile general --out benchmark_report.json
+```
+
 ## Config
 
 Default config is in `skills/default_security_skills.yaml`.
@@ -120,6 +154,8 @@ Tune these for your environment:
 - `max_files` / `max_file_bytes`: context budget
 - `model`: model name used by all agents
 - selection controls: `min_severity`, `only_severity`, `min_confidence`, `max_fixes` (CLI flags)
+- policy controls via `secagent.policy.yaml`
+- suppressions via `secagent.ignore.yaml`
 
 Use the deep LLM profile:
 
@@ -214,6 +250,9 @@ The default skills pack now includes deep coverage for:
 - fix application results (if `--apply-fixes`)
 - PR metadata (if `--create-pr`)
 - multi-PR metadata (if `--multi-pr-mode` is not `none`)
+- stage timing artifacts and context-cache metadata
+- incremental finding markers (`is_new`, `fingerprint`)
+- telemetry JSONL at `.secagent_runs/metrics.jsonl`
 
 ## Notes
 
@@ -223,3 +262,4 @@ The default skills pack now includes deep coverage for:
 - If validator commands are missing, secagent infers fallback test commands for common stacks (`pytest`, `go test`, `jest`/`npm test`, `cargo test`).
 - Run artifacts are written per execution to `.secagent_runs/<run_id>/report.json`.
 - CI workflow is available at `.github/workflows/secagent.yml` for weekly + manual scans with SARIF upload.
+- CI now uses split modes: fast diff-aware PR scans and deeper scheduled/manual scans.

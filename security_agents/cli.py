@@ -17,16 +17,21 @@ from security_agents.automation import (
     validate_patch_guardrails,
 )
 from security_agents.config import load_config
-from security_agents.execution import run_validation_execution
+from security_agents.execution import run_validation_execution, run_validation_execution_in_worktree
+from security_agents.history import annotate_new_findings
 from security_agents.pipeline import run_pipeline
+from security_agents.policy import load_policy
 from security_agents.profiles import resolve_config_path
 from security_agents.reporting import findings_to_sarif
 from security_agents.selection import (
     SEVERITY_ORDER,
     filter_and_rank_fixes,
+    finding_risk_score,
     finding_severity,
     summarize_findings_by_class,
 )
+from security_agents.suppression import apply_suppressions, load_suppressions
+from security_agents.telemetry import append_metrics_jsonl
 
 
 def parse_args() -> argparse.Namespace:
@@ -39,6 +44,8 @@ def parse_args() -> argparse.Namespace:
         help="Built-in skill profile to use when --config is not set.",
     )
     parser.add_argument("--config", default=None, help="Path to YAML config")
+    parser.add_argument("--policy", default="secagent.policy.yaml", help="Policy file path (policy-as-code).")
+    parser.add_argument("--suppressions", default="secagent.ignore.yaml", help="Suppression file path.")
     parser.add_argument("--out", default="security_report.json", help="Output JSON file")
     parser.add_argument(
         "--sarif-out",
@@ -55,6 +62,24 @@ def parse_args() -> argparse.Namespace:
         "--artifacts-dir",
         default=".secagent_runs",
         help="Directory for per-run stage artifacts and metadata.",
+    )
+    parser.add_argument(
+        "--metrics-jsonl",
+        default=".secagent_runs/metrics.jsonl",
+        help="JSONL path for run telemetry metrics.",
+    )
+    parser.add_argument("--changed-only", action="store_true", help="Scan only changed files (plus focus radius).")
+    parser.add_argument("--changed-base", default="origin/main", help="Git base ref used with --changed-only.")
+    parser.add_argument(
+        "--changed-radius",
+        type=int,
+        default=1,
+        help="Directory radius for additional context around changed files.",
+    )
+    parser.add_argument(
+        "--new-only",
+        action="store_true",
+        help="Only select fixes for findings not seen in prior runs (fingerprint-based).",
     )
     parser.add_argument(
         "--summary-only",
@@ -86,6 +111,12 @@ def parse_args() -> argparse.Namespace:
         help="Only include fixes for findings with confidence >= this value (0..1).",
     )
     parser.add_argument(
+        "--min-risk-score",
+        type=float,
+        default=0.0,
+        help="Only include fixes for findings with composite risk score >= this value (0..1).",
+    )
+    parser.add_argument(
         "--max-fixes",
         type=int,
         default=None,
@@ -95,6 +126,11 @@ def parse_args() -> argparse.Namespace:
         "--run-validation",
         action="store_true",
         help="Execute validator-provided test commands against --repo.",
+    )
+    parser.add_argument(
+        "--validation-in-worktree",
+        action="store_true",
+        help="Run validation in an isolated temporary git worktree.",
     )
     parser.add_argument(
         "--validation-gate",
@@ -144,7 +180,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--guardrail-protected-path",
         action="append",
-        default=["auth/", "security/", "crypto/", "migrations/"],
+        default=[],
         help="Path prefix that requires manual override if touched. Can be set multiple times.",
     )
     parser.add_argument(
@@ -171,6 +207,8 @@ def parse_args() -> argparse.Namespace:
         help="PR body.",
     )
     parser.add_argument("--pr-draft", action="store_true", help="Open the PR as draft.")
+    parser.add_argument("--pr-label", action="append", default=[], help="Label to apply to created PR(s).")
+    parser.add_argument("--pr-reviewer", action="append", default=[], help="Reviewer to request on created PR(s).")
     parser.add_argument(
         "--multi-pr-mode",
         choices=["none", "class", "severity", "class-severity"],
@@ -216,14 +254,32 @@ def _write_artifacts(artifacts_root: Path, run_id: str, payload: dict) -> Path:
     return run_dir
 
 
+def _changed_files(repo: Path, base_ref: str) -> set[str]:
+    diff = subprocess.run(
+        ["git", "diff", "--name-only", f"{base_ref}...HEAD"],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if diff.returncode != 0:
+        return set()
+    return {line.strip() for line in diff.stdout.splitlines() if line.strip()}
+
+
 def main() -> int:
     args = parse_args()
     repo = Path(args.repo).resolve()
     config_path = resolve_config_path(args.profile, args.config)
     config = load_config(config_path)
+    policy = load_policy(args.policy)
+
+    suppressions = load_suppressions(args.suppressions)
 
     if args.min_confidence < 0 or args.min_confidence > 1:
         raise ValueError("--min-confidence must be between 0 and 1")
+    if args.min_risk_score < 0 or args.min_risk_score > 1:
+        raise ValueError("--min-risk-score must be between 0 and 1")
     if args.max_fixes is not None and args.max_fixes < 0:
         raise ValueError("--max-fixes must be >= 0")
     if args.validation_gate != "none" and not args.run_validation:
@@ -233,7 +289,19 @@ def main() -> int:
     if args.multi_pr_limit <= 0:
         raise ValueError("--multi-pr-limit must be > 0")
 
-    output = run_pipeline(repo, config)
+    changed_files = _changed_files(repo, args.changed_base) if args.changed_only else set()
+
+    output = run_pipeline(
+        repo,
+        config,
+        focus_files=changed_files if args.changed_only else None,
+        focus_radius=args.changed_radius,
+    )
+
+    output.accepted_findings, new_count = annotate_new_findings(repo, output.accepted_findings)
+    unsuppressed, suppressed_entries = apply_suppressions(output.accepted_findings, suppressions)
+    output.accepted_findings = unsuppressed
+
     run_id = uuid.uuid4().hex[:12]
     generated_at = datetime.now(timezone.utc).isoformat()
 
@@ -246,18 +314,30 @@ def main() -> int:
     validation_execution_post: list[dict] = []
     failed_validation_ids: set[str] = set()
 
+    effective_min_confidence = max(args.min_confidence, policy.min_confidence)
+    effective_min_risk = max(args.min_risk_score, policy.min_risk_score)
+    protected_paths = args.guardrail_protected_path or policy.deny_path_prefixes
+
     selected_fixes = filter_and_rank_fixes(
         accepted_findings=output.accepted_findings,
         fixes=output.fixes,
-        min_confidence=args.min_confidence,
+        min_confidence=effective_min_confidence,
+        min_risk_score=effective_min_risk,
         min_severity=args.min_severity,
         only_severity=args.only_severity,
         max_fixes=args.max_fixes,
+        new_only=args.new_only,
     )
     filtered_fixes = selected_fixes
 
+    if policy.require_validation_for_critical and not args.run_validation:
+        has_critical = any(finding_severity(f) == "critical" for f in output.accepted_findings)
+        if has_critical:
+            raise RuntimeError("Policy requires validation when critical findings exist.")
+
     if args.run_validation:
-        validation_execution_pre = run_validation_execution(
+        runner = run_validation_execution_in_worktree if args.validation_in_worktree else run_validation_execution
+        validation_execution_pre = runner(
             repo=repo,
             validation_items=output.validation,
             command_template=args.validation_command_template,
@@ -290,7 +370,7 @@ def main() -> int:
             stats=guardrail_stats,
             max_files=args.guardrail_max_files,
             max_changed_lines=args.guardrail_max_lines,
-            deny_path_prefixes=args.guardrail_protected_path,
+            deny_path_prefixes=protected_paths,
             allow_protected_paths=args.allow_protected_paths,
         )
         if not passed:
@@ -299,7 +379,8 @@ def main() -> int:
         if args.validation_gate == "pre-post":
             fixed_ids = {str(item.get("id", "")) for item in apply_results if item.get("applied")}
             target_validation = [item for item in output.validation if str(item.get("id", "")) in fixed_ids]
-            validation_execution_post = run_validation_execution(
+            runner = run_validation_execution_in_worktree if args.validation_in_worktree else run_validation_execution
+            validation_execution_post = runner(
                 repo=repo,
                 validation_items=target_validation,
                 command_template=args.validation_command_template,
@@ -328,8 +409,10 @@ def main() -> int:
                 fixes=filtered_fixes,
                 max_files=args.guardrail_max_files,
                 max_changed_lines=args.guardrail_max_lines,
-                deny_path_prefixes=args.guardrail_protected_path,
+                deny_path_prefixes=protected_paths,
                 allow_protected_paths=args.allow_protected_paths,
+                labels=args.pr_label,
+                reviewers=args.pr_reviewer,
             )
             if not pr_result.get("ok"):
                 raise RuntimeError(f"PR creation failed: {pr_result.get('error', 'unknown error')}")
@@ -356,11 +439,21 @@ def main() -> int:
                 commit_message_prefix=args.commit_message,
                 max_files=args.guardrail_max_files,
                 max_changed_lines=args.guardrail_max_lines,
-                deny_path_prefixes=args.guardrail_protected_path,
+                deny_path_prefixes=protected_paths,
                 allow_protected_paths=args.allow_protected_paths,
+                labels=args.pr_label,
+                reviewers=args.pr_reviewer,
             )
             if not any(item.get("ok") for item in pr_results):
                 raise RuntimeError("Multi-PR creation failed for all groups.")
+
+    risk_summary = {
+        "avg_risk": round(
+            sum(finding_risk_score(finding) for finding in output.accepted_findings) / max(len(output.accepted_findings), 1),
+            4,
+        ),
+        "max_risk": max([finding_risk_score(finding) for finding in output.accepted_findings], default=0.0),
+    }
 
     payload = {
         "run_id": run_id,
@@ -376,6 +469,13 @@ def main() -> int:
             "hit": output.context_cache_hit,
             "key": output.context_cache_key,
         },
+        "diff_scope": {
+            "changed_only": args.changed_only,
+            "changed_base": args.changed_base,
+            "changed_radius": args.changed_radius,
+            "changed_file_count": len(changed_files),
+            "changed_files": sorted(changed_files),
+        },
         "budgets": {
             "stage_timeout_seconds": config.stage_timeout_seconds,
             "max_validation_items": config.max_validation_items,
@@ -385,17 +485,35 @@ def main() -> int:
         "scanned_files": output.scanned_files,
         "severity_counts": severity_counts,
         "class_summary": class_summary,
+        "risk_summary": risk_summary,
         "selection": {
             "min_severity": args.min_severity,
             "only_severity": args.only_severity,
-            "min_confidence": args.min_confidence,
+            "min_confidence": effective_min_confidence,
+            "min_risk_score": effective_min_risk,
             "max_fixes": args.max_fixes,
+            "new_only": args.new_only,
             "selected_fix_count_pre_validation": len(selected_fixes),
+            "new_findings_count": new_count,
+        },
+        "policy": {
+            "path": args.policy,
+            "effective": {
+                "min_confidence": policy.min_confidence,
+                "min_risk_score": policy.min_risk_score,
+                "require_validation_for_critical": policy.require_validation_for_critical,
+                "deny_path_prefixes": policy.deny_path_prefixes,
+            },
+        },
+        "suppressions": {
+            "path": args.suppressions,
+            "count": len(suppressed_entries),
+            "entries": suppressed_entries,
         },
         "guardrails": {
             "max_files": args.guardrail_max_files,
             "max_lines": args.guardrail_max_lines,
-            "protected_paths": args.guardrail_protected_path,
+            "protected_paths": protected_paths,
             "allow_protected_paths": args.allow_protected_paths,
             "diff_stats": guardrail_stats,
         },
@@ -430,6 +548,19 @@ def main() -> int:
 
     artifacts_root = Path(args.artifacts_dir)
     artifact_dir = _write_artifacts(artifacts_root, run_id, payload)
+
+    telemetry_payload = {
+        "run_id": run_id,
+        "generated_at": generated_at,
+        "profile": args.profile,
+        "accepted": len(output.accepted_findings),
+        "rejected": len(output.rejected_findings),
+        "selected_fixes": len(filtered_fixes),
+        "new_findings": new_count,
+        "context_cache_hit": output.context_cache_hit,
+        "stage_timing": output.stage_artifacts.get("timing", {}),
+    }
+    append_metrics_jsonl(args.metrics_jsonl, telemetry_payload)
 
     print(f"Run ID: {run_id}")
     print(f"Wrote report: {out_path}")

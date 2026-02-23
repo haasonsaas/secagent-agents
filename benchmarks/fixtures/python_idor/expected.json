@@ -1,0 +1,6 @@
+{
+  "expected_classes": [
+    "BOLA/IDOR on Object Reads and Writes"
+  ],
+  "notes": "Fixture is intentionally vulnerable and used for regression checks."
+}

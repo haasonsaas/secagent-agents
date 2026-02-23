@@ -6,6 +6,7 @@ from fnmatch import fnmatch
 import hashlib
 from pathlib import Path
 import subprocess
+import time
 from typing import Any
 
 from agents import Agent, Runner
@@ -85,7 +86,32 @@ def _context_cache_path(root: Path, cache_key: str) -> Path:
     return cache_dir / f"context_{cache_key}.txt"
 
 
-def build_code_context(root: Path, config: AppConfig) -> tuple[str, bool, str | None]:
+def _is_within_focus(path: Path, focus_files: set[str] | None, focus_radius: int) -> bool:
+    if not focus_files:
+        return True
+    posix = path.as_posix()
+    if posix in focus_files:
+        return True
+    if focus_radius <= 0:
+        return False
+    for focus in focus_files:
+        focus_parent = Path(focus).parent
+        current = path.parent
+        for _ in range(focus_radius):
+            if str(current.as_posix()) == str(focus_parent.as_posix()):
+                return True
+            if str(current) == ".":
+                break
+            current = current.parent
+    return False
+
+
+def build_code_context(
+    root: Path,
+    config: AppConfig,
+    focus_files: set[str] | None = None,
+    focus_radius: int = 0,
+) -> tuple[str, bool, str | None]:
     cache_key = _context_cache_key(root, config)
     cache_path = _context_cache_path(root, cache_key)
     if config.use_context_cache and cache_path.exists():
@@ -95,7 +121,10 @@ def build_code_context(root: Path, config: AppConfig) -> tuple[str, bool, str | 
     for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue
-        if _should_include(path.relative_to(root), config.include_globs, config.exclude_globs):
+        rel = path.relative_to(root)
+        if not _is_within_focus(rel, focus_files, focus_radius):
+            continue
+        if _should_include(rel, config.include_globs, config.exclude_globs):
             files.append(path)
         if len(files) >= config.max_files:
             break
@@ -115,12 +144,19 @@ def build_code_context(root: Path, config: AppConfig) -> tuple[str, bool, str | 
     return context, False, cache_key
 
 
-def list_scanned_files(root: Path, config: AppConfig) -> list[str]:
+def list_scanned_files(
+    root: Path,
+    config: AppConfig,
+    focus_files: set[str] | None = None,
+    focus_radius: int = 0,
+) -> list[str]:
     scanned: list[str] = []
     for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue
         rel = path.relative_to(root)
+        if not _is_within_focus(rel, focus_files, focus_radius):
+            continue
         if _should_include(rel, config.include_globs, config.exclude_globs):
             scanned.append(rel.as_posix())
         if len(scanned) >= config.max_files:
@@ -290,34 +326,55 @@ async def run_fixer(
     return [item.model_dump() for item in result.final_output.fixes]
 
 
-async def run_pipeline_async(root: Path, config: AppConfig) -> PipelineOutput:
-    scanned_files = list_scanned_files(root, config)
-    code_context, context_cache_hit, context_cache_key = build_code_context(root, config)
+async def run_pipeline_async(
+    root: Path,
+    config: AppConfig,
+    focus_files: set[str] | None = None,
+    focus_radius: int = 0,
+) -> PipelineOutput:
+    stage_timing: dict[str, float] = {}
 
+    t0 = time.monotonic()
+    scanned_files = list_scanned_files(root, config, focus_files=focus_files, focus_radius=focus_radius)
+    code_context, context_cache_hit, context_cache_key = build_code_context(
+        root,
+        config,
+        focus_files=focus_files,
+        focus_radius=focus_radius,
+    )
+    stage_timing["context_build_seconds"] = round(time.monotonic() - t0, 3)
+
+    t1 = time.monotonic()
     detector_results = await asyncio.gather(
         *(
             run_detector(vuln, config.model, code_context, config.stage_timeout_seconds)
             for vuln in config.vulnerability_classes
         )
     )
+    stage_timing["detectors_seconds"] = round(time.monotonic() - t1, 3)
 
     accepted_findings: list[dict[str, Any]] = []
     rejected_findings: list[dict[str, Any]] = []
     manager_artifacts: list[dict[str, Any]] = []
 
+    t2 = time.monotonic()
     for vuln, result in zip(config.vulnerability_classes, detector_results):
         accepted, rejected, mgr_art = await run_manager(vuln, config.model, result, config.stage_timeout_seconds)
         accepted_findings.extend(accepted)
         rejected_findings.extend(rejected)
         manager_artifacts.append(mgr_art)
+    stage_timing["managers_seconds"] = round(time.monotonic() - t2, 3)
 
+    t3 = time.monotonic()
     exploitability = await run_exploitability(config.model, accepted_findings, code_context, config.stage_timeout_seconds)
+    stage_timing["exploitability_seconds"] = round(time.monotonic() - t3, 3)
     exploit_by_id = {str(item.get("id", "")): item for item in exploitability}
     for finding in accepted_findings:
         finding_id = str(finding.get("id", ""))
         if finding_id in exploit_by_id:
             finding["exploitability"] = exploit_by_id[finding_id]
 
+    t4 = time.monotonic()
     validation = await run_validator(
         config.model,
         accepted_findings,
@@ -325,6 +382,8 @@ async def run_pipeline_async(root: Path, config: AppConfig) -> PipelineOutput:
         config.stage_timeout_seconds,
         config.max_validation_items,
     )
+    stage_timing["validator_seconds"] = round(time.monotonic() - t4, 3)
+    t5 = time.monotonic()
     fixes = await run_fixer(
         config.model,
         accepted_findings,
@@ -333,6 +392,7 @@ async def run_pipeline_async(root: Path, config: AppConfig) -> PipelineOutput:
         config.stage_timeout_seconds,
         config.max_fix_items,
     )
+    stage_timing["fixer_seconds"] = round(time.monotonic() - t5, 3)
 
     stage_artifacts = {
         "detectors": [
@@ -343,6 +403,7 @@ async def run_pipeline_async(root: Path, config: AppConfig) -> PipelineOutput:
         "exploitability": exploitability,
         "validation_count": len(validation),
         "fixes_count": len(fixes),
+        "timing": stage_timing,
     }
 
     return PipelineOutput(
@@ -358,5 +419,10 @@ async def run_pipeline_async(root: Path, config: AppConfig) -> PipelineOutput:
     )
 
 
-def run_pipeline(root: Path, config: AppConfig) -> PipelineOutput:
-    return asyncio.run(run_pipeline_async(root, config))
+def run_pipeline(
+    root: Path,
+    config: AppConfig,
+    focus_files: set[str] | None = None,
+    focus_radius: int = 0,
+) -> PipelineOutput:
+    return asyncio.run(run_pipeline_async(root, config, focus_files=focus_files, focus_radius=focus_radius))

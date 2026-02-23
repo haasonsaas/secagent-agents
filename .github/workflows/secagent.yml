@@ -1,6 +1,7 @@
 name: secagent
 
 on:
+  pull_request:
   workflow_dispatch:
     inputs:
       profile:
@@ -31,7 +32,55 @@ permissions:
   security-events: write
 
 jobs:
-  scan:
+  fast-pr:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync dependencies
+        run: uv sync --dev
+
+      - name: Run secagent (fast diff mode)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          uv run secagent \
+            --repo . \
+            --profile general \
+            --changed-only \
+            --changed-base origin/${{ github.base_ref }} \
+            --summary-only \
+            --fail-on-severity critical \
+            --sarif-out secagent.sarif \
+            --out security_report.json
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: secagent.sarif
+
+      - name: Upload run artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: secagent-fast-pr
+          path: |
+            security_report.json
+            secagent.sarif
+            .secagent_runs/
+
+  deep-scheduled:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,7 +94,7 @@ jobs:
       - name: Sync dependencies
         run: uv sync --dev
 
-      - name: Run secagent
+      - name: Run secagent (deep mode)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
@@ -54,20 +103,24 @@ jobs:
           uv run secagent \
             --repo . \
             --profile "$PROFILE" \
+            --run-validation \
+            --validation-gate pre \
             --summary-only \
             --fail-on-severity "$FAIL_ON" \
             --sarif-out secagent.sarif \
             --out security_report.json
 
       - name: Upload SARIF
+        if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: secagent.sarif
 
       - name: Upload run artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: secagent-run
+          name: secagent-deep
           path: |
             security_report.json
             secagent.sarif

@@ -59,7 +59,7 @@ def _cwe_tags_for_class(vuln_class: str) -> list[str]:
     return list(dict.fromkeys(tags))
 
 
-def _finding_fingerprint(vuln_class: str, nested: dict[str, Any]) -> str:
+def finding_fingerprint(vuln_class: str, nested: dict[str, Any]) -> str:
     raw = "|".join(
         [
             vuln_class,
@@ -118,7 +118,7 @@ def findings_to_sarif(findings: list[dict[str, Any]], tool_name: str = "secagent
             "level": _normalize_severity(severity),
             "message": {"text": f"[{finding_id}] {title}: {summary}"},
             "partialFingerprints": {
-                "primaryLocationLineHash": _finding_fingerprint(vuln_class, nested),
+                "primaryLocationLineHash": finding_fingerprint(vuln_class, nested),
             },
             "properties": {
                 "security-severity": severity,

@@ -41,9 +41,11 @@ def test_filter_and_rank_fixes():
         accepted_findings=accepted,
         fixes=fixes,
         min_confidence=0.7,
+        min_risk_score=0.0,
         min_severity="medium",
         only_severity=None,
         max_fixes=None,
+        new_only=False,
     )
 
     assert [x["id"] for x in selected] == ["a", "b"]

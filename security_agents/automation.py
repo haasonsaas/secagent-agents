@@ -126,6 +126,8 @@ def _create_pr_with_worktree(
     max_changed_lines: int | None,
     deny_path_prefixes: list[str],
     allow_protected_paths: bool,
+    labels: list[str],
+    reviewers: list[str],
 ) -> dict[str, Any]:
     temp_dir = Path(tempfile.mkdtemp(prefix="secagent-pr-"))
     try:
@@ -174,6 +176,10 @@ def _create_pr_with_worktree(
             return {"ok": False, "error": push.stderr.strip() or "git push failed", "apply_results": apply_results}
 
         pr_cmd = ["gh", "pr", "create", "--base", base, "--head", branch, "--title", title, "--body", body]
+        for label in labels:
+            pr_cmd.extend(["--label", label])
+        for reviewer in reviewers:
+            pr_cmd.extend(["--reviewer", reviewer])
         if draft:
             pr_cmd.append("--draft")
         pr = _run(pr_cmd, cwd=temp_dir)
@@ -209,6 +215,8 @@ def create_pr_for_changes(
     max_changed_lines: int | None,
     deny_path_prefixes: list[str],
     allow_protected_paths: bool,
+    labels: list[str],
+    reviewers: list[str],
 ) -> dict[str, Any]:
     final_branch = branch or f"secagent/auto-fixes-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
     return _create_pr_with_worktree(
@@ -224,6 +232,8 @@ def create_pr_for_changes(
         max_changed_lines=max_changed_lines,
         deny_path_prefixes=deny_path_prefixes,
         allow_protected_paths=allow_protected_paths,
+        labels=labels,
+        reviewers=reviewers,
     )
 
 
@@ -239,6 +249,8 @@ def create_multi_prs_for_groups(
     max_changed_lines: int | None,
     deny_path_prefixes: list[str],
     allow_protected_paths: bool,
+    labels: list[str],
+    reviewers: list[str],
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     now = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
@@ -269,6 +281,8 @@ def create_multi_prs_for_groups(
             max_changed_lines=max_changed_lines,
             deny_path_prefixes=deny_path_prefixes,
             allow_protected_paths=allow_protected_paths,
+            labels=labels,
+            reviewers=reviewers,
         )
         created["label"] = label
         created["fix_count"] = len(fixes)

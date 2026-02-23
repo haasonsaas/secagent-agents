@@ -1,0 +1,9 @@
+auto_fix:
+  min_confidence: 0.55
+  min_risk_score: 0.45
+  require_validation_for_critical: true
+  deny_path_prefixes:
+    - auth/
+    - security/
+    - crypto/
+    - migrations/

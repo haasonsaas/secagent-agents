@@ -4,6 +4,8 @@ from dataclasses import dataclass
 import shlex
 import subprocess
 from pathlib import Path
+import shutil
+import tempfile
 from typing import Any
 
 
@@ -227,3 +229,47 @@ def run_validation_execution(
         )
 
     return execution
+
+
+def run_validation_execution_in_worktree(
+    repo: Path,
+    validation_items: list[dict[str, Any]],
+    command_template: str | None,
+    timeout_seconds: int,
+    max_items: int,
+    base_ref: str = "HEAD",
+) -> list[dict[str, Any]]:
+    temp_dir = Path(tempfile.mkdtemp(prefix="secagent-validate-"))
+    try:
+        add = subprocess.run(
+            ["git", "worktree", "add", "--detach", str(temp_dir), base_ref],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if add.returncode != 0:
+            return [
+                {
+                    "id": "",
+                    "status": "error",
+                    "reason": add.stderr.strip() or "failed to create validation worktree",
+                    "results": [],
+                }
+            ]
+        return run_validation_execution(
+            repo=temp_dir,
+            validation_items=validation_items,
+            command_template=command_template,
+            timeout_seconds=timeout_seconds,
+            max_items=max_items,
+        )
+    finally:
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(temp_dir)],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        shutil.rmtree(temp_dir, ignore_errors=True)
