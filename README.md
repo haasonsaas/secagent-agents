@@ -22,6 +22,13 @@ Run against any repository:
 uv run secagent --repo /path/to/target/repo --out security_report.json
 ```
 
+Use built-in profile shortcuts:
+
+```bash
+uv run secagent --repo /path/to/target/repo --profile general
+uv run secagent --repo /path/to/target/repo --profile llm
+```
+
 CI gate example:
 
 ```bash
@@ -108,6 +115,15 @@ uv run secagent \
   --config skills/llm_security_skills.yaml \
   --min-severity medium \
   --min-confidence 0.6
+```
+
+Export SARIF for GitHub code scanning workflows:
+
+```bash
+uv run secagent \
+  --repo /path/to/target/repo \
+  --profile llm \
+  --sarif-out secagent.sarif
 ```
 
 The LLM profile goes deep on:

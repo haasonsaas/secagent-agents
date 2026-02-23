@@ -15,6 +15,8 @@ from security_agents.automation import (
 from security_agents.config import load_config
 from security_agents.execution import run_validation_execution
 from security_agents.pipeline import run_pipeline
+from security_agents.profiles import resolve_config_path
+from security_agents.reporting import findings_to_sarif
 from security_agents.selection import (
     SEVERITY_ORDER,
     filter_and_rank_fixes,
@@ -26,8 +28,19 @@ from security_agents.selection import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a detector-manager-validator-fixer security pipeline")
     parser.add_argument("--repo", default=".", help="Path to target repository")
+    parser.add_argument(
+        "--profile",
+        choices=["general", "llm"],
+        default="general",
+        help="Built-in skill profile to use when --config is not set.",
+    )
     parser.add_argument("--config", default=None, help="Path to YAML config")
     parser.add_argument("--out", default="security_report.json", help="Output JSON file")
+    parser.add_argument(
+        "--sarif-out",
+        default=None,
+        help="Optional SARIF output path for accepted findings (e.g. secagent.sarif).",
+    )
     parser.add_argument(
         "--summary-only",
         action="store_true",
@@ -155,7 +168,8 @@ def _group_key_for_fix(fix: dict, lookup: dict[str, dict], mode: str) -> str:
 def main() -> int:
     args = parse_args()
     repo = Path(args.repo).resolve()
-    config = load_config(args.config)
+    config_path = resolve_config_path(args.profile, args.config)
+    config = load_config(config_path)
 
     if args.min_confidence < 0 or args.min_confidence > 1:
         raise ValueError("--min-confidence must be between 0 and 1")
@@ -276,8 +290,13 @@ def main() -> int:
 
     out_path = Path(args.out)
     out_path.write_text(json.dumps(payload, indent=2))
+    if args.sarif_out:
+        sarif_payload = findings_to_sarif(output.accepted_findings)
+        Path(args.sarif_out).write_text(json.dumps(sarif_payload, indent=2))
 
     print(f"Wrote report: {out_path}")
+    if args.sarif_out:
+        print(f"Wrote SARIF: {args.sarif_out}")
     print(f"Accepted findings: {len(output.accepted_findings)}")
     print(f"Rejected findings: {len(output.rejected_findings)}")
     print(f"Validation items: {len(output.validation)}")
