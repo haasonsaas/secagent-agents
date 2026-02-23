@@ -1,49 +1,250 @@
 model: gpt-4.1
-max_file_bytes: 12000
-max_files: 80
+max_file_bytes: 14000
+max_files: 140
 include_globs:
   - "**/*.py"
   - "**/*.js"
+  - "**/*.jsx"
   - "**/*.ts"
   - "**/*.tsx"
   - "**/*.go"
   - "**/*.java"
+  - "**/*.rb"
+  - "**/*.php"
+  - "**/*.cs"
+  - "**/*.rs"
+  - "**/*.kt"
+  - "**/*.swift"
+  - "**/*.yml"
+  - "**/*.yaml"
+  - "**/*.json"
+  - "**/*.tf"
+  - "**/Dockerfile"
 exclude_globs:
   - "**/.git/**"
   - "**/node_modules/**"
   - "**/.venv/**"
   - "**/dist/**"
   - "**/build/**"
+  - "**/.next/**"
+  - "**/coverage/**"
   - "**/__pycache__/**"
+  - "**/.mypy_cache/**"
 
 vulnerability_classes:
-  - name: "Insecure Direct Object Reference"
-    description: "User can access another tenant/user resource through guessable identifiers without authorization checks."
+  - name: "BOLA/IDOR on Object Reads and Writes"
+    description: "User can read or mutate another tenant/user object because object lookup is not constrained by ownership or tenant boundaries."
     detector_instructions: |
-      Search handlers/controllers/services for user-controlled IDs.
-      Verify each object fetch is scoped by tenant/account ownership.
-      Prioritize endpoints returning financial, PII, or admin data.
+      Track user-controlled identifiers from route params, query params, and request bodies into repository/ORM lookups.
+      For each lookup and mutation, verify explicit tenant/account/user ownership checks on the same code path.
+      Treat list/batch operations as high-risk: missing per-item authorization is still exploitable.
+      Prioritize endpoints returning financial data, PII, admin settings, invoices, cards, payouts, and audit records.
+      Include an exploit sequence with two principals (attacker and victim) and concrete IDs.
     manager_checks:
-      - "Reject findings that are only theoretical or require impossible attacker capabilities."
-      - "Reject findings that already include explicit ownership/tenant checks in code path."
-      - "Accept only if exploit path is clear and impact is concrete."
+      - "Reject findings where ownership is enforced centrally and proven on the exact execution path."
+      - "Reject findings that require privileged DB/infra access instead of API-level attacker capabilities."
+      - "Accept only with a concrete cross-tenant/cross-user object access scenario and clear impact."
 
-  - name: "Missing Authorization on Sensitive Action"
-    description: "Mutation endpoint executes privileged action without role or permission checks."
+  - name: "Missing Authorization on Sensitive Actions"
+    description: "Authenticated but under-privileged users can perform privileged state transitions due to missing/incorrect authorization checks."
     detector_instructions: |
-      Locate write/update/delete operations and money movement/state transition actions.
-      Confirm an authorization guard exists near entrypoint or enforced in called policy layer.
-      Flag endpoints where authn exists but authz is missing.
+      Identify high-impact mutations: role changes, approval steps, money movement, webhook configuration, API key lifecycle, and account settings.
+      Confirm permission checks happen before state mutation and are bound to actor, resource, and action.
+      Detect policy confusion where authentication checks are mistaken for authorization checks.
+      Look for internal service methods reused by multiple routes without route-level permission enforcement.
     manager_checks:
-      - "Reject findings where centralized middleware clearly enforces required permission."
-      - "Accept when privilege boundary is violated for realistic attacker roles."
+      - "Reject when role/permission middleware clearly enforces required privileges for the same route."
+      - "Reject if flagged action is effectively no-op or constrained by immutable backend invariants."
+      - "Accept when realistic low-privilege actors can execute privileged action end-to-end."
 
-  - name: "SQL/Query Injection"
-    description: "User input reaches database query text/filters unsafely."
+  - name: "Mass Assignment / Over-Posting"
+    description: "Client-controlled fields are bound directly to model updates/creates, allowing unauthorized field mutation."
     detector_instructions: |
-      Look for string concatenation/interpolation in SQL or ORM raw query functions.
-      Verify parameterized queries are used and untrusted input is validated.
-      Include exploit payload shape in findings.
+      Find request-to-model binding patterns such as spread operators, generic merge/update APIs, or direct deserialization into entities.
+      Check whether sensitive fields (role, status, limits, tenant_id, owner_id, is_admin, payment state) are allow-listed.
+      Verify DTO-to-domain mapping strips unknown/privileged fields before persistence.
+      Look for patch endpoints where validation differs between create and update flows.
     manager_checks:
-      - "Reject cases using parameter binding correctly."
-      - "Accept only when input to query construction is attacker-controlled and unsanitized."
+      - "Reject if explicit allow-list/serializer prevents sensitive-field mutation."
+      - "Reject if sensitive fields are overwritten server-side regardless of user input."
+      - "Accept only with concrete sensitive field(s) that attacker can set and resulting impact."
+
+  - name: "SQL/ORM Injection"
+    description: "Untrusted input influences SQL/ORM query structure without safe parameterization."
+    detector_instructions: |
+      Trace tainted input into raw SQL, dynamic where/order clauses, query builders, and ORM escape hatches.
+      Flag string interpolation/concatenation in query text, dynamic identifiers, and unsafe IN-list construction.
+      Verify use of parameter binding for values and strict allow-listing for dynamic identifiers/sort fields.
+      Include sample payload shape and expected data/control impact.
+    manager_checks:
+      - "Reject when proper parameter binding is consistently used for attacker-controlled values."
+      - "Reject when dynamic fragments are constrained by strict enum allow-lists."
+      - "Accept only with attacker-controlled input that alters query semantics."
+
+  - name: "NoSQL / Query Operator Injection"
+    description: "Attacker injects query operators or structured filters into NoSQL/JSON query APIs."
+    detector_instructions: |
+      Inspect Mongo/DocumentDB/Elasticsearch and similar query APIs for direct use of request objects as filters.
+      Detect permissive parsing that allows operators like $ne, $where, $regex, or scripted expressions.
+      Verify schema validation and operator allow-listing are enforced before query execution.
+      Prioritize authentication, search, and authorization-related query paths.
+    manager_checks:
+      - "Reject when input normalization strips or blocks operators and nested objects."
+      - "Reject when query layer builds filters from strict typed fields only."
+      - "Accept only with a clear operator-injection path and practical exploit effect."
+
+  - name: "Command Injection"
+    description: "User input reaches shell/process execution APIs and can alter executed commands."
+    detector_instructions: |
+      Locate process execution sinks (shell=True, exec, spawn, system, popen, Runtime.exec, ProcessBuilder misuse).
+      Trace untrusted input through command construction, argument concatenation, and environment variables.
+      Prefer secure exec forms with fixed binaries and separated argument arrays.
+      Highlight indirect injection through templated scripts and chained shell invocations.
+    manager_checks:
+      - "Reject when no shell interpretation occurs and arguments are fully separated/sanitized."
+      - "Reject if attacker input is strictly validated against a tight allow-list before sink."
+      - "Accept when attacker-controlled bytes can affect command tokens or shell metacharacters."
+
+  - name: "Path Traversal and Unsafe File Access"
+    description: "Attacker-controlled paths allow reading/writing files outside intended directories."
+    detector_instructions: |
+      Trace user input into filesystem read/write/archive extraction APIs.
+      Check canonicalization and directory boundary enforcement after path normalization.
+      Detect zip-slip/tar-slip extraction patterns writing entries with ../ or absolute paths.
+      Prioritize endpoints handling uploads, exports, templates, and report generation.
+    manager_checks:
+      - "Reject when normalized path is validated to remain under a fixed base directory."
+      - "Reject when only opaque server-generated file identifiers are accepted."
+      - "Accept only if traversal to sensitive paths is practically reachable by remote input."
+
+  - name: "Server-Side Request Forgery (SSRF)"
+    description: "Backend performs attacker-influenced outbound requests to internal or restricted network targets."
+    detector_instructions: |
+      Find URL fetch/proxy/webhook preview/import features using user-supplied URLs.
+      Check protections for scheme allow-listing, DNS rebinding, redirects, and private IP/range blocking.
+      Verify metadata-service protections (169.254.169.254, cloud metadata domains) and loopback restrictions.
+      Include protocol variants (http, https, gopher, file, dict) where relevant.
+    manager_checks:
+      - "Reject when outbound fetchers enforce robust URL parsing and deny private/internal destinations."
+      - "Reject if feature only contacts hardcoded trusted hosts with strict validation."
+      - "Accept when attacker can induce backend requests to internal services or metadata endpoints."
+
+  - name: "Cross-Site Scripting (Stored/Reflected/DOM)"
+    description: "Untrusted content is rendered in HTML/JS context without correct contextual escaping or sanitization."
+    detector_instructions: |
+      Trace user-controlled content into templates, server-rendered HTML, and client-side sinks (innerHTML, dangerouslySetInnerHTML).
+      Validate contextual escaping for HTML, attribute, JS, URL, and CSS contexts.
+      Check markdown/rich-text rendering pipelines and sanitizer bypass opportunities.
+      Prioritize administrative dashboards and pages viewed by privileged operators.
+    manager_checks:
+      - "Reject when framework auto-escaping is preserved and dangerous sinks are not used."
+      - "Reject when robust sanitizer is applied before rendering in the correct context."
+      - "Accept only with executable payload path in a browser context."
+
+  - name: "Cross-Site Request Forgery (CSRF)"
+    description: "State-changing requests can be forged due to missing CSRF protections in cookie-authenticated flows."
+    detector_instructions: |
+      Identify cookie/session-authenticated mutation endpoints lacking anti-CSRF tokens or equivalent defenses.
+      Verify SameSite, origin/referer validation, and token binding strategy for high-risk actions.
+      Distinguish pure bearer-token APIs from browser-cookie flows to reduce false positives.
+      Prioritize account changes, billing actions, and credential management.
+    manager_checks:
+      - "Reject for endpoints that are not reachable in browser credentialed contexts."
+      - "Reject when token/origin checks are consistently enforced for the endpoint."
+      - "Accept when a cross-site request can trigger a state change with victim credentials."
+
+  - name: "XXE / XML Parser Misconfiguration"
+    description: "XML parsing allows external entities/DTD features leading to file read, SSRF, or DoS."
+    detector_instructions: |
+      Find XML parsing code and parser configuration flags related to external entities, DTDs, and expansion limits.
+      Verify secure parser defaults are explicitly configured where runtime defaults are unsafe/ambiguous.
+      Check SVG/XML upload and SOAP integrations where untrusted XML may be processed.
+      Identify billion laughs/entity expansion DoS risk in addition to data exfiltration.
+    manager_checks:
+      - "Reject when parser configuration disables external entities and DTD processing explicitly."
+      - "Reject if XML source is trusted and not attacker-controllable in deployment context."
+      - "Accept only with attacker-controlled XML reaching vulnerable parser settings."
+
+  - name: "Insecure Deserialization / Unsafe Dynamic Evaluation"
+    description: "Untrusted data is deserialized or evaluated in a way that enables code execution or object abuse."
+    detector_instructions: |
+      Detect dangerous deserialization/eval sinks (pickle, yaml load unsafe modes, object streams, eval/Function/new Function).
+      Trace untrusted input from network/storage into these sinks.
+      Verify safe alternatives (safe loaders, typed schemas, strict codecs) and signature/envelope validation.
+      Prioritize message queues, cache blobs, job payloads, and webhook/event ingestion.
+    manager_checks:
+      - "Reject when safe parser/mode is used with strict schema validation."
+      - "Reject when serialized payloads are cryptographically signed and verified before processing."
+      - "Accept with concrete attacker-controlled payload path to unsafe execution/deserialization sink."
+
+  - name: "Open Redirect and Unvalidated Forward"
+    description: "Attacker controls redirect/forward destination enabling phishing token leakage or auth flow abuse."
+    detector_instructions: |
+      Find redirect targets sourced from query/body/headers and client-provided return URLs.
+      Validate host/path allow-listing and canonicalization checks before redirect.
+      Examine login/OAuth/SAML callback and post-auth redirect logic for domain confusion.
+      Flag partial validations that only check prefixes or substrings.
+    manager_checks:
+      - "Reject when redirect targets are mapped from server-side route identifiers only."
+      - "Reject when strict host/path allow-lists are applied after normalization."
+      - "Accept when attacker can control destination to external or privileged internal targets."
+
+  - name: "Broken Crypto and Token Handling"
+    description: "Weak crypto primitives or token validation mistakes allow forgery, disclosure, or downgrade attacks."
+    detector_instructions: |
+      Detect weak algorithms/modes (e.g., MD5/SHA1 for security use, ECB, static IVs, non-crypto RNG for secrets).
+      Review JWT/session token validation for alg confusion, missing signature checks, weak key sizes, and claim validation gaps.
+      Verify key management patterns: hardcoded secrets, unchecked key rotation, and plaintext secret storage.
+      Prioritize authentication, password reset, API auth, and signed webhook verification paths.
+    manager_checks:
+      - "Reject informational findings that do not affect a security boundary or exploitability."
+      - "Reject when weak primitive usage is non-security-related and isolated from trust decisions."
+      - "Accept when weakness can realistically enable token forgery, credential compromise, or data disclosure."
+
+  - name: "Sensitive Data Exposure in Logs and Errors"
+    description: "Secrets, credentials, tokens, PII, or payment data are exposed via logs, traces, or verbose errors."
+    detector_instructions: |
+      Trace sensitive fields through logging and error handling code paths.
+      Flag raw request/response dumps, exception serialization, and debug logs in production paths.
+      Verify redaction/masking and structured logging policies for auth and payment workflows.
+      Prioritize centralized logger helpers and middleware where leakage amplifies.
+    manager_checks:
+      - "Reject when redaction occurs before data reaches sinks and coverage is verifiable."
+      - "Reject if logged values are one-way hashes or non-sensitive identifiers only."
+      - "Accept when plaintext sensitive data can be emitted to logs/errors accessible to operators or attackers."
+
+  - name: "Secrets and Credential Material in Code/Config"
+    description: "Hardcoded keys, tokens, credentials, or private material in source, IaC, and config files."
+    detector_instructions: |
+      Scan code and config for API keys, private keys, cloud creds, webhook secrets, and default credentials.
+      Distinguish test fixtures from production-relevant credentials and focus on high-confidence secrets.
+      Check IaC and deployment manifests for plaintext secret exposure.
+      Include entropy/pattern evidence and likely blast radius.
+    manager_checks:
+      - "Reject obvious placeholders, examples, and documented fake test values."
+      - "Reject encrypted blobs that are not directly usable credentials."
+      - "Accept with high-confidence secret indicators and realistic abuse path."
+
+  - name: "Race Conditions on Financial/Quota Operations"
+    description: "Concurrent requests can bypass invariants (double spend, duplicate withdrawal, quota overrun)."
+    detector_instructions: |
+      Identify non-atomic read-check-write sequences around balances, limits, credits, inventory, and approvals.
+      Verify transactional boundaries, locking strategies, idempotency keys, and uniqueness constraints.
+      Focus on endpoints exposed to repeated/replayed concurrent requests.
+      Provide a minimal concurrent exploit sequence that violates an invariant.
+    manager_checks:
+      - "Reject if strict DB constraints/transactions guarantee invariant preservation."
+      - "Reject if idempotency and replay protections fully cover operation semantics."
+      - "Accept when practical concurrent requests can trigger duplicate or inconsistent state changes."
+
+  - name: "Insecure File Upload and Processing"
+    description: "Upload flows permit dangerous file types/content leading to code execution, XSS, or malware persistence."
+    detector_instructions: |
+      Review upload endpoints for extension/MIME/content validation mismatches and trust in client-provided metadata.
+      Check storage/serving paths for executable files, HTML/script uploads, and unsafe content-disposition handling.
+      Inspect image/document processing pipelines for parser invocation risks and sandbox gaps.
+      Confirm antivirus/sanitization and access controls for uploaded artifacts.
+    manager_checks:
+      - "Reject when server-side content validation and safe storage/serving controls are comprehensive."
+      - "Reject if uploaded files are never interpreted or served in executable/renderable contexts."
+      - "Accept only with a realistic path from attacker upload to harmful execution/rendering."

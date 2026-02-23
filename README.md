@@ -88,6 +88,7 @@ uv run pytest
 ## Config
 
 Default config is in `skills/default_security_skills.yaml`.
+Research notes and source repos are in `skills/research_sources.md`.
 
 Tune these for your environment:
 
@@ -96,6 +97,23 @@ Tune these for your environment:
 - `max_files` / `max_file_bytes`: context budget
 - `model`: model name used by all agents
 - selection controls: `min_severity`, `only_severity`, `min_confidence`, `max_fixes` (CLI flags)
+
+The default skills pack now includes deep coverage for:
+
+- BOLA/IDOR and missing authorization
+- Mass assignment
+- SQL/NoSQL injection
+- Command injection
+- Path traversal
+- SSRF
+- XSS and CSRF
+- XXE
+- Insecure deserialization/eval
+- Open redirect
+- Broken crypto/token handling
+- Sensitive logging and hardcoded secrets
+- Race conditions on financial/quota flows
+- Insecure file upload/processing
 
 ## Output
 
