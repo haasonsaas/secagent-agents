@@ -1,0 +1,6 @@
+aliases:
+  sec-team:
+    - security-lead
+    - appsec-engineer
+  payments-team:
+    - payments-oncall

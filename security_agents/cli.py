@@ -16,7 +16,13 @@ from security_agents.automation import (
     get_staged_diff_stats,
     validate_patch_guardrails,
 )
-from security_agents.codeowners import owners_for_paths, parse_codeowners
+from security_agents.codeowners import (
+    expand_owner_aliases,
+    load_reviewer_aliases,
+    owners_for_paths,
+    parse_codeowners,
+    resolve_codeowners_path,
+)
 from security_agents.config import load_config
 from security_agents.execution import run_validation_execution, run_validation_execution_in_worktree
 from security_agents.history import annotate_new_findings
@@ -221,6 +227,11 @@ def parse_args() -> argparse.Namespace:
         help="Path to CODEOWNERS file used with --auto-reviewers-from-codeowners.",
     )
     parser.add_argument(
+        "--reviewer-aliases",
+        default="secagent.reviewers.yaml",
+        help="YAML aliases file for reviewer expansion.",
+    )
+    parser.add_argument(
         "--multi-pr-mode",
         choices=["none", "class", "severity", "class-severity"],
         default="none",
@@ -368,6 +379,7 @@ def main() -> int:
     guardrail_stats: dict | None = None
     auto_reviewers: list[str] = []
     reviewers: list[str] = list(args.pr_reviewer)
+    resolved_codeowners: Path | None = None
 
     if args.apply_fixes and not args.create_pr:
         if not args.allow_dirty_repo:
@@ -410,14 +422,16 @@ def main() -> int:
         if not filtered_fixes:
             raise RuntimeError("No fixes selected; refusing to create PR.")
         if args.auto_reviewers_from_codeowners:
-            rules = parse_codeowners(args.codeowners_path)
+            resolved_codeowners = resolve_codeowners_path(repo, args.codeowners_path)
+            rules = parse_codeowners(resolved_codeowners) if resolved_codeowners else []
+            aliases = load_reviewer_aliases(args.reviewer_aliases)
             candidate_paths: list[str] = []
             for fix in filtered_fixes:
                 for path in fix.get("files_to_change", []) or []:
                     path_s = str(path)
                     if path_s and path_s not in candidate_paths:
                         candidate_paths.append(path_s)
-            auto_reviewers = owners_for_paths(candidate_paths, rules)
+            auto_reviewers = expand_owner_aliases(owners_for_paths(candidate_paths, rules), aliases)
         reviewers = list(dict.fromkeys(args.pr_reviewer + auto_reviewers))
 
         if args.multi_pr_mode == "none":
@@ -544,7 +558,8 @@ def main() -> int:
             "labels": args.pr_label,
             "requested_reviewers": reviewers,
             "auto_reviewers": auto_reviewers,
-            "codeowners_path": args.codeowners_path if args.auto_reviewers_from_codeowners else None,
+            "codeowners_path": str(resolved_codeowners) if args.auto_reviewers_from_codeowners and resolved_codeowners else None,
+            "reviewer_aliases_path": args.reviewer_aliases if args.auto_reviewers_from_codeowners else None,
         },
         "accepted_findings": output.accepted_findings,
         "rejected_findings": [] if args.summary_only else output.rejected_findings,

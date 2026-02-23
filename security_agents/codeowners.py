@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from fnmatch import fnmatch
+from typing import Any
+
+import yaml
 
 
 @dataclass
@@ -31,6 +34,53 @@ def parse_codeowners(path: str | Path) -> list[CodeownersRule]:
             pattern = pattern[1:]
         rules.append(CodeownersRule(pattern=pattern, owners=owners))
     return rules
+
+
+def resolve_codeowners_path(repo: Path, preferred_path: str | Path | None = None) -> Path | None:
+    if preferred_path:
+        preferred = Path(preferred_path)
+        if preferred.is_absolute():
+            return preferred if preferred.exists() else None
+        candidate = repo / preferred
+        return candidate if candidate.exists() else None
+
+    candidates = [
+        repo / "CODEOWNERS",
+        repo / ".github" / "CODEOWNERS",
+        repo / "docs" / "CODEOWNERS",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def load_reviewer_aliases(path: str | Path | None) -> dict[str, list[str]]:
+    if not path:
+        return {}
+    p = Path(path)
+    if not p.exists():
+        return {}
+    raw = yaml.safe_load(p.read_text()) or {}
+    aliases: dict[str, list[str]] = {}
+    for key, value in (raw.get("aliases", {}) or {}).items():
+        names = [str(x).lstrip("@") for x in value] if isinstance(value, list) else [str(value).lstrip("@")]
+        aliases[str(key).lstrip("@")] = [name for name in names if name]
+    return aliases
+
+
+def expand_owner_aliases(owners: list[str], aliases: dict[str, list[str]]) -> list[str]:
+    expanded: list[str] = []
+    for owner in owners:
+        alias_targets = aliases.get(owner)
+        if alias_targets:
+            for target in alias_targets:
+                if target not in expanded:
+                    expanded.append(target)
+            continue
+        if owner not in expanded:
+            expanded.append(owner)
+    return expanded
 
 
 def _matches(pattern: str, path: str) -> bool:

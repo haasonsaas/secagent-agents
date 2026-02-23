@@ -104,7 +104,8 @@ uv run secagent \
   --apply-fixes \
   --create-pr \
   --auto-reviewers-from-codeowners \
-  --codeowners-path CODEOWNERS
+  --codeowners-path CODEOWNERS \
+  --reviewer-aliases secagent.reviewers.yaml
 ```
 
 Enable patch guardrails:
@@ -151,6 +152,11 @@ Benchmark fixtures:
 uv run secagent --repo benchmarks/fixtures/python_idor --profile general --out benchmark_report.json
 uv run secagent-bench --profile general --strict
 ```
+
+Benchmark CI:
+
+- Workflow at `.github/workflows/secagent-bench.yml`
+- Runs strict benchmark checks on relevant PR changes
 
 ## Config
 
@@ -275,3 +281,4 @@ The default skills pack now includes deep coverage for:
 - Run artifacts are written per execution to `.secagent_runs/<run_id>/report.json`.
 - CI workflow is available at `.github/workflows/secagent.yml` for weekly + manual scans with SARIF upload.
 - CI now uses split modes: fast diff-aware PR scans and deeper scheduled/manual scans.
+- CODEOWNERS auto-reviewer resolution supports fallback locations (`CODEOWNERS`, `.github/CODEOWNERS`, `docs/CODEOWNERS`) and alias expansion via `secagent.reviewers.yaml`.
