@@ -14,4 +14,6 @@ __all__ = [
     "suppression",
     "history",
     "telemetry",
+    "codeowners",
+    "benchmark",
 ]

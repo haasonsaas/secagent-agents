@@ -3,4 +3,8 @@ __pycache__/
 *.pyc
 .env
 security_report.json
+secagent.sarif
+.secagent_runs/
+.secagent_cache/
+benchmarks/fixtures/**/_benchmark_report.json
 .DS_Store

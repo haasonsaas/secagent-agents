@@ -12,6 +12,7 @@ dependencies = [
 
 [project.scripts]
 secagent = "security_agents.cli:main"
+secagent-bench = "security_agents.benchmark:main"
 
 [build-system]
 requires = ["hatchling>=1.24.0"]

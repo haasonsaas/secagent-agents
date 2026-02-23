@@ -96,6 +96,17 @@ uv run secagent \
   --pr-base main
 ```
 
+Auto-request reviewers from `CODEOWNERS` for auto PRs:
+
+```bash
+uv run secagent \
+  --repo /path/to/target/repo \
+  --apply-fixes \
+  --create-pr \
+  --auto-reviewers-from-codeowners \
+  --codeowners-path CODEOWNERS
+```
+
 Enable patch guardrails:
 
 ```bash
@@ -138,6 +149,7 @@ Benchmark fixtures:
 
 ```bash
 uv run secagent --repo benchmarks/fixtures/python_idor --profile general --out benchmark_report.json
+uv run secagent-bench --profile general --strict
 ```
 
 ## Config
